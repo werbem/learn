@@ -9,7 +9,8 @@ export interface AnalysisInput {
     | "competitive_defense"
     | "positioning_switch"
     | "partnership_evaluation"
-    | "feature_benchmark";
+    | "feature_benchmark"
+    | "__custom__";
   optional?: Record<string, unknown>;
 }
 
@@ -93,6 +94,19 @@ export const PHASE_LABELS: Record<string, string> = {
   review_failed: "审查未通过",
   need_more_research: "证据不足",
 };
+
+export const CUSTOM_OBJECTIVE = "__custom__";
+
+export const OBJECTIVE_OPTIONS = [
+  { value: "product_improvement", label: "产品改进 — 对标竞品发现短板" },
+  { value: "go_to_market", label: "市场进入 — 制定差异化策略" },
+  { value: "investment_due_diligence", label: "投资尽调 — 评估竞争壁垒" },
+  { value: "competitive_defense", label: "竞争防御 — 应对竞品进攻" },
+  { value: "positioning_switch", label: "定位转型 — 重新定义定位" },
+  { value: "partnership_evaluation", label: "合作评估 — 生态合作考察" },
+  { value: "feature_benchmark", label: "功能对标 — 深度功能对比" },
+  { value: CUSTOM_OBJECTIVE, label: "自定义分析目标..." },
+];
 
 export const PHASE_ORDER: Record<string, number> = {
   initialized: 0,
