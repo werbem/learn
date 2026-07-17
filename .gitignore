@@ -1,0 +1,32 @@
+# Dependencies
+backend/venv/
+backend/__pycache__/
+frontend/node_modules/
+frontend/.next/
+.pnpm-store/
+
+# Environment
+.env
+.env.local
+backend/.env
+
+# Build artifacts
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# IDE
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Data (except tracked)
+data/*.db
+data/word_outputs/*.docx
+
+# OS
+.DS_Store
+Thumbs.db
