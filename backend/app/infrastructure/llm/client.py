@@ -1,15 +1,37 @@
-"""LLM client abstraction — mock implementation only."""
+"""LLM client abstraction — OpenAI implementation with Mock fallback.
+
+Supports:
+  - OpenAI API (gpt-4o-mini, gpt-4o, etc.)
+  - Structured output via Pydantic response_model
+  - Retry with exponential backoff
+  - Timeout configuration
+  - Token & cost tracking
+  - Graceful fallback to Mock when no API key
+"""
 
 from __future__ import annotations
 
+import json
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, AsyncIterator, Optional
 
-from pydantic import BaseModel
+from openai import APIError, APITimeoutError, AsyncOpenAI, RateLimitError
+from pydantic import BaseModel, ValidationError
 
 from app.config.settings import settings
 
+
+# ── Retry Configuration ──
+
+_RETRY_MAX = 3
+_RETRY_BASE_DELAY = 1.0  # seconds
+_RETRY_MAX_DELAY = 15.0
+_TIMEOUT = 30.0  # default timeout seconds
+
+
+# ── Response ──
 
 @dataclass
 class LLMResponse:
@@ -21,16 +43,90 @@ class LLMResponse:
     duration_ms: int = 0
 
 
-class LLMClient:
-    """Mock LLM client.
+# ── Cost tracking ──
 
-    In Phase 1 this returns canned responses.
-    Replace with OpenAI / Anthropic client in Phase 2.
+_MODEL_COST_PER_1K = {
+    "gpt-4o": {"prompt": 0.0025, "completion": 0.01},
+    "gpt-4o-mini": {"prompt": 0.00015, "completion": 0.0006},
+    "gpt-4o-2024-08-06": {"prompt": 0.0025, "completion": 0.01},
+    "gpt-4o-mini-2024-07-18": {"prompt": 0.00015, "completion": 0.0006},
+}
+
+
+def _estimate_cost(model: str, prompt_tokens: int, completion_tokens: int) -> float:
+    rates = _MODEL_COST_PER_1K.get(model, {"prompt": 0.001, "completion": 0.002})
+    return (prompt_tokens * rates["prompt"] + completion_tokens * rates["completion"]) / 1000
+
+
+# ── Structured Output Helpers ──
+
+def _build_json_schema(model_class: type[BaseModel]) -> dict:
+    """Build a JSON Schema for OpenAI Structured Outputs."""
+    schema = model_class.model_json_schema()
+    # Remove top-level $defs if present — OpenAI doesn't need them inline
+    schema.pop("$defs", None)
+    return schema
+
+
+def _parse_response(
+    content: str,
+    response_model: type[BaseModel] | None,
+) -> tuple[str, BaseModel | None]:
+    """Parse JSON response into Pydantic model with retry."""
+    if response_model is None:
+        return content, None
+
+    # Try direct JSON parse
+    try:
+        # Strip markdown code fences if present
+        cleaned = content.strip()
+        if cleaned.startswith("```"):
+            cleaned = cleaned.split("\n", 1)[-1]
+            cleaned = cleaned.rsplit("```", 1)[0]
+        if cleaned.startswith("```json"):
+            cleaned = cleaned.split("\n", 1)[-1]
+            cleaned = cleaned.rsplit("```", 1)[0]
+
+        data = json.loads(cleaned)
+        parsed = response_model.model_validate(data)
+        return content, parsed
+    except (json.JSONDecodeError, ValidationError) as exc:
+        # Fallback: try to find JSON in the response
+        import re
+        json_match = re.search(r"\{.*\}", content, re.DOTALL)
+        if json_match:
+            try:
+                data = json.loads(json_match.group())
+                parsed = response_model.model_validate(data)
+                return content, parsed
+            except (json.JSONDecodeError, ValidationError):
+                pass
+        # If all parsing fails, return raw content
+        return content, None
+
+
+# ── Main Client ──
+
+class LLMClient:
+    """LLM client with real OpenAI support and Mock fallback.
+
+    Usage:
+        client = LLMClient()
+        resp = await client.generate(
+            system_prompt="You are an analyst.",
+            user_prompt="Analyze...",
+            response_model=ResearchPlan,     # optional Pydantic model
+        )
+        print(resp.parsed)  # ResearchPlan instance or None
     """
 
     def __init__(self) -> None:
         self.provider = settings.llm_provider
         self.model = settings.llm_model
+        self.api_key = settings.llm_api_key
+        self._openai_client: AsyncOpenAI | None = None
+
+    # ── Public API ──
 
     async def generate(
         self,
@@ -39,33 +135,23 @@ class LLMClient:
         response_model: type[BaseModel] | None = None,
         temperature: float = 0.7,
     ) -> LLMResponse:
-        """Generate a response using the configured LLM provider.
+        """Generate a response.
 
-        MOCK: returns a placeholder message with empty parsed model.
+        Uses OpenAI when LLM_PROVIDER=openai and API key is set.
+        Falls back to Mock otherwise.
         """
         start = datetime.now()
 
-        _ = system_prompt, user_prompt, temperature
-
-        content = (
-            f"[MOCK {self.provider.value}/{self.model}] "
-            f"Received: {user_prompt[:60]}..."
-        )
-
-        parsed: Optional[BaseModel] = None
-        if response_model:
-            parsed = response_model()
+        if self._use_openai():
+            result = await self._generate_openai(
+                system_prompt, user_prompt, response_model, temperature,
+            )
+        else:
+            result = self._generate_mock(system_prompt, user_prompt, response_model)
 
         elapsed = int((datetime.now() - start).total_seconds() * 1000)
-
-        return LLMResponse(
-            content=content,
-            parsed=parsed,
-            prompt_tokens=128,
-            completion_tokens=64,
-            model=f"mock/{self.model}",
-            duration_ms=elapsed,
-        )
+        result.duration_ms = elapsed
+        return result
 
     async def stream(
         self,
@@ -74,12 +160,185 @@ class LLMClient:
     ) -> AsyncIterator[str]:
         """Stream tokens from the LLM.
 
-        MOCK: yields the full response as a single chunk.
+        Uses OpenAI when configured, Mock fallback otherwise.
         """
-        yield (
-            f"[MOCK STREAM] This is a simulated streaming response for: "
-            f"{user_prompt[:40]}..."
+        if self._use_openai():
+            async for chunk in self._stream_openai(system_prompt, user_prompt):
+                yield chunk
+        else:
+            yield (
+                f"[MOCK STREAM] Simulated streaming response for: "
+                f"{user_prompt[:40]}..."
+            )
+
+    # ── Provider Detection ──
+
+    def _use_openai(self) -> bool:
+        return (
+            self.api_key != "" and self.provider.value != "mock"
         )
 
+    def _client(self) -> AsyncOpenAI:
+        if self._openai_client is None:
+            self._openai_client = AsyncOpenAI(
+                api_key=self.api_key,
+                timeout=_TIMEOUT,
+                max_retries=0,  # we handle retries ourselves
+            )
+        return self._openai_client
+
+    # ── OpenAI Implementation ──
+
+    async def _generate_openai(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        response_model: type[BaseModel] | None = None,
+        temperature: float = 0.7,
+    ) -> LLMResponse:
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+
+        kwargs: dict[str, Any] = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": temperature,
+            "timeout": _TIMEOUT,
+        }
+
+        # Structured Outputs support (gpt-4o-mini+)
+        if response_model is not None:
+            kwargs["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": response_model.__name__,
+                    "schema": _build_json_schema(response_model),
+                    "strict": True,
+                },
+            }
+
+        last_error: Exception | None = None
+        for attempt in range(_RETRY_MAX):
+            try:
+                response = await self._client().chat.completions.create(**kwargs)
+            except RateLimitError as exc:
+                last_error = exc
+                wait = min(
+                    _RETRY_BASE_DELAY * (2 ** attempt),
+                    _RETRY_MAX_DELAY,
+                )
+                time.sleep(wait)
+                continue
+            except APITimeoutError as exc:
+                last_error = exc
+                if attempt < _RETRY_MAX - 1:
+                    wait = _RETRY_BASE_DELAY * (2 ** attempt)
+                    time.sleep(wait)
+                    continue
+                return LLMResponse(
+                    content=f"[TIMEOUT] Request timed out after {_TIMEOUT}s",
+                    model=f"openai/{self.model}",
+                    duration_ms=0,
+                )
+            except APIError as exc:
+                last_error = exc
+                if attempt < _RETRY_MAX - 1:
+                    wait = _RETRY_BASE_DELAY * (2 ** attempt)
+                    time.sleep(wait)
+                    continue
+                return LLMResponse(
+                    content=f"[API_ERROR] {exc}",
+                    model=f"openai/{self.model}",
+                    duration_ms=0,
+                )
+
+            # Process successful response
+            choice = response.choices[0]
+            raw_content = choice.message.content or ""
+            prompt_tokens = response.usage.prompt_tokens if response.usage else 0
+            completion_tokens = response.usage.completion_tokens if response.usage else 0
+
+            # Parse structured output
+            content, parsed = _parse_response(raw_content, response_model)
+
+            return LLMResponse(
+                content=content,
+                parsed=parsed,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                model=f"openai/{response.model}",
+                duration_ms=0,
+            )
+
+        # All retries exhausted
+        return LLMResponse(
+            content=f"[RETRY_EXHAUSTED] {last_error}",
+            model=f"openai/{self.model}",
+            prompt_tokens=0,
+            completion_tokens=0,
+            duration_ms=0,
+        )
+
+    async def _stream_openai(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+    ) -> AsyncIterator[str]:
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+
+        try:
+            stream = await self._client().chat.completions.create(
+                model=self.model,
+                messages=messages,
+                temperature=0.7,
+                stream=True,
+                timeout=_TIMEOUT,
+            )
+            async for chunk in stream:
+                delta = chunk.choices[0].delta if chunk.choices else None
+                if delta and delta.content:
+                    yield delta.content
+        except Exception:
+            yield "[STREAM_ERROR] Streaming failed, falling back to mock..."
+            yield (
+                f"[MOCK STREAM] Simulated response for: {user_prompt[:40]}..."
+            )
+
+    # ── Mock Fallback ──
+
+    @staticmethod
+    def _generate_mock(
+        system_prompt: str,
+        user_prompt: str,
+        response_model: type[BaseModel] | None = None,
+    ) -> LLMResponse:
+        """Return mock response when OpenAI is not configured."""
+        content = (
+            f"[MOCK] Received: {user_prompt[:60]}..."
+        )
+
+        parsed: Optional[BaseModel] = None
+        if response_model:
+            try:
+                parsed = response_model()
+            except ValidationError:
+                parsed = None
+
+        return LLMResponse(
+            content=content,
+            parsed=parsed,
+            prompt_tokens=128,
+            completion_tokens=64,
+            model="mock",
+            duration_ms=0,
+        )
+
+
+# ── Singleton ──
 
 llm_client = LLMClient()
