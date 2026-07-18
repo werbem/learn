@@ -1,17 +1,23 @@
-"""Research Agent — evidence collection engine.
+"""Research Agent — evidence collection via Tavily Search + LLM extraction.
 
-遵循「互联网产品竞品分析模板」的 10 大分析维度，自动生成 Research Plan，
-跨多源采集证据，输出标准化的 EvidenceBundle。
+Flow:
+  1. Generate focused search queries via LLM
+  2. Execute searches via Tavily API
+  3. LLM extracts structured evidence from search results
+  4. Build EvidenceBundle + QualityReport
 
-原则：
-  - 不分析：只收集原始证据，不做推断
-  - 不总结：只输出结构化事实
-  - 引用来源：每条证据必须标注来源和可信度
+Rules:
+  - No fabricated sources: every evidence must have a real URL
+  - No evidence → return empty list (never invent)
+  - First stage: Tavily web search only (no AppStore/GooglePlay/Social)
 """
 
 from __future__ import annotations
 
+from pydantic import BaseModel, Field
+
 import asyncio
+import json
 from datetime import datetime
 from typing import Any
 
@@ -26,249 +32,43 @@ from app.application.dto.agent_dto import (
 )
 from app.config.constants import Phase
 from app.infrastructure.agents.base import AgentContext, AgentResult, BaseAgent
-from app.infrastructure.tools.search_tool import (
-    SearchResult,
-    app_store_search,
-    google_play_search,
-    news_search,
-    social_search,
-    web_scraper,
-    web_search,
+from app.infrastructure.agents.research_prompt import (
+    EvidenceItem,
+    ExtractedEvidence,
+    SYSTEM_PROMPT,
+    build_extraction_prompt,
 )
+from app.infrastructure.llm.client import llm_client
+from app.infrastructure.tools.tavily_tool import TavilyResult, tavily_search
 
-# ── 模板维度 → 搜索映射 ──
-# 基于「互联网产品竞品分析模板」Section 3 的 10 大分析维度
+# ── Query Generation ──
 
-TEMPLATE_DIMENSIONS: list[dict[str, Any]] = [
-    {
-        "id": "positioning",
-        "label": "产品概览与定位",
-        "keywords": ["产品定位", "公司介绍", "核心价值主张", "市场定位", "一句话定位"],
-        "sources": ["web", "news"],
-        "weight": 10,
-    },
-    {
-        "id": "users",
-        "label": "目标用户与画像",
-        "keywords": ["目标用户", "用户画像", "用户规模", "MAU", "DAU", "用户获取"],
-        "sources": ["web", "social", "app_store", "google_play"],
-        "weight": 15,
-    },
-    {
-        "id": "features",
-        "label": "核心功能对比",
-        "keywords": ["功能", "功能介绍", "核心功能", "产品模块", "API"],
-        "sources": ["web", "app_store", "google_play", "news"],
-        "weight": 20,
-    },
-    {
-        "id": "ux",
-        "label": "用户体验与设计",
-        "keywords": ["用户体验", "交互设计", "UI", "新手引导", "设计风格"],
-        "sources": ["app_store", "google_play", "social"],
-        "weight": 10,
-    },
-    {
-        "id": "business",
-        "label": "商业模式与收费",
-        "keywords": ["商业模式", "定价", "收费", "订阅", "付费", "营收"],
-        "sources": ["web", "news"],
-        "weight": 15,
-    },
-    {
-        "id": "technology",
-        "label": "技术架构与能力",
-        "keywords": ["技术栈", "技术架构", "AI能力", "基础设施", "云服务"],
-        "sources": ["web"],
-        "weight": 10,
-    },
-    {
-        "id": "growth",
-        "label": "增长策略与市场",
-        "keywords": ["增长策略", "市场策略", "运营", "获客", "增长率"],
-        "sources": ["web", "news", "social"],
-        "weight": 10,
-    },
-    {
-        "id": "competitive_landscape",
-        "label": "竞争格局",
-        "keywords": ["竞争格局", "市场份额", "竞争对手", "行业排名"],
-        "sources": ["web", "news"],
-        "weight": 5,
-    },
-    {
-        "id": "risks",
-        "label": "风险评估",
-        "keywords": ["风险", "挑战", "合规", "数据安全", "政策"],
-        "sources": ["news", "social"],
-        "weight": 5,
-    },
-    # strategy = 战略建议 — 不可搜索，仅分析
-]
+_SEARCH_QUERY_SYSTEM = """你是一个搜索策略专家。根据竞品分析目标，生成 3-5 个精准的中文搜索查询。
 
+要求：
+1. 每个查询必须具体、可搜索
+2. 覆盖不同角度（用户、功能、市场、竞品对比等）
+3. 优先使用具体产品名、公司名
+4. 返回纯 JSON 数组
 
-# ── 搜索源执行器 ──
+示例输出格式：
+["飞猪 DAU 下降 原因 分析", "飞猪 vs 携程 用户对比 2025", "在线旅游平台 用户流失 原因"]"""
 
-_SOURCE_EXECUTORS: dict[str, Any] = {
-    "web": web_search,
-    "web_scraper": web_scraper,
-    "news": news_search,
-    "app_store": app_store_search,
-    "google_play": google_play_search,
-    "social": social_search,
-}
+_SEARCH_QUERY_MODEL = type("SearchQueries", (), {
+    "__annotations__": {"queries": list[str]},
+    "__module__": "research_agent",
+})
 
-
-async def _search_source(
-    source_type: str,
-    keywords: list[str],
-) -> tuple[str, SearchResult]:
-    """Dispatch a search task to the appropriate tool."""
-    executor = _SOURCE_EXECUTORS.get(source_type)
-    if executor is None:
-        return source_type, SearchResult(
-            items=[], status="no_data", total_found=0,
-        )
-
-    try:
-        if source_type == "web":
-            result = await executor.search(keywords, max_results=5)
-        elif source_type == "web_scraper":
-            # web_scraper.fetch needs a URL — handled separately in URL scraping
-            result = SearchResult(items=[], status="no_data", total_found=0)
-        elif source_type == "news":
-            result = await executor.search(keywords, max_results=8)
-        elif source_type == "app_store":
-            result = await executor.search(" ".join(keywords))
-        elif source_type == "google_play":
-            result = await executor.search(" ".join(keywords))
-        elif source_type == "social":
-            result = await executor.search("zhihu", keywords)
-        else:
-            result = SearchResult(items=[], status="no_data", total_found=0)
-    except Exception:
-        result = SearchResult(items=[], status="failed", total_found=0)
-
-    return source_type, result
-
-
-def _to_evidence_items(
-    source_type: str,
-    results: SearchResult,
-    dimension_id: str,
-    company_label: str,
-) -> list[dict]:
-    """Convert raw search results to evidence item dicts."""
-    items: list[dict] = []
-    now = datetime.utcnow().isoformat()
-
-    for raw in results.items:
-        content = (
-            raw.get("content")
-            or raw.get("snippet")
-            or raw.get("description")
-            or raw.get("excerpt")
-            or raw.get("title")
-            or ""
-        )
-        if not content:
-            continue
-
-        # Determine confidence based on source
-        source_str = raw.get("source", source_type)
-        is_mock = source_str.startswith("mock_")
-        confidence = "estimated" if is_mock else "likely"
-
-        evidence = {
-            "source": raw.get("url") or raw.get("source_name", "") or source_type,
-            "source_type": source_type,
-            "content": content[:2000],  # Truncate to 2000 chars
-            "confidence": confidence,
-            "category": dimension_id,
-            "extracted_at": now,
-            "raw_data": {
-                k: v for k, v in raw.items()
-                if k not in ("content", "snippet", "description", "excerpt")
-            },
-        }
-        items.append(evidence)
-
-    return items
-
-
-# ── 官网抓取 ──
-
-async def _scrape_website(
-    company_name: str,
-    product_name: str,
-) -> list[dict]:
-    """Try to scrape the company's official website."""
-    evidence_items: list[dict] = []
-    urls_to_try = [
-        f"https://www.{company_name}.com",
-        f"https://{company_name}.com",
-        f"https://{company_name}.cn",
-        f"https://www.{company_name}.com.cn",
-    ]
-
-    now = datetime.utcnow().isoformat()
-    scraped_urls = set()
-
-    for url in urls_to_try:
-        if url in scraped_urls:
-            continue
-        scraped_urls.add(url)
-
-        try:
-            result = await web_scraper.fetch(url, extract_meta=True)
-            if result.items:
-                item = result.items[0]
-                content = item.get("content", "")
-                title = item.get("title", "")
-                if content and len(content) > 20:  # Only accept meaningful content
-                    evidence_items.append({
-                        "source": url,
-                        "source_type": "web",
-                        "content": content[:2000],
-                        "confidence": "verified",
-                        "category": "positioning",
-                        "extracted_at": now,
-                        "raw_data": {"title": title, "status": item.get("status")},
-                    })
-                    break  # First successful scrape is enough
-        except Exception:
-            continue
-
-    # Fallback: generate mock website content
-    if not evidence_items:
-        evidence_items.append({
-            "source": f"https://{company_name}.com",
-            "source_type": "web",
-            "content": (
-                f"[MOCK] {company_name} 官方网站内容摘要。"
-                f"{company_name} 是一家专注于 {product_name} 的产品公司，"
-                f"致力于为用户提供优质的 {product_name} 服务。"
-                f"公司产品覆盖多个平台，服务大量企业客户。"
-            ),
-            "confidence": "estimated",
-            "category": "positioning",
-            "extracted_at": now,
-            "raw_data": {"note": "网络请求失败，使用生成内容"},
-        })
-
-    return evidence_items
+# Inject Pydantic validation
+import pydantic
+QueriesList = pydantic.create_model(
+    "SearchQueries",
+    queries=(list[str], pydantic.Field(description="搜索查询列表，3-5个")),
+)
 
 
 class ResearchAgent(BaseAgent[ResearchInput, ResearchOutput]):
-    """Research Agent — executes evidence collection across multiple sources.
-
-    Workflow:
-      1. Auto-generate Research Plan from template dimensions
-      2. Scrape official websites
-      3. Execute parallel search tasks per dimension
-      4. Collect and structure evidence into EvidenceBundle
-      5. Calculate quality scores
-    """
+    """Research Agent — Tavily search + LLM evidence extraction."""
 
     @property
     def agent_name(self) -> str:
@@ -279,297 +79,298 @@ class ResearchAgent(BaseAgent[ResearchInput, ResearchOutput]):
         return Phase.RESEARCHING
 
     async def arun(self, ctx: AgentContext, input_data: ResearchInput) -> AgentResult:
-        our = input_data.our_company
-        competitor = input_data.competitor_company
-        product = input_data.product
+        """Execute evidence collection.
 
-        # Phase 1: Scrape official websites for both companies
-        our_website_ev = await _scrape_website(our, product)
-        comp_website_ev = await _scrape_website(competitor, product)
-
-        # Phase 2: Generate search tasks from template dimensions
-        search_tasks: list[asyncio.Task] = []
-        for dim in TEMPLATE_DIMENSIONS:
-            dim_id = dim["id"]
-            base_kws = dim["keywords"]
-            sources = dim["sources"]
-
-            for company_label, company_name in [("our", our), ("competitor", competitor)]:
-                keywords = [f"{company_name} {product}"] + [
-                    f"{company_name} {kw}" for kw in base_kws
-                ]
-                # Deduplicate
-                keywords = list(dict.fromkeys(keywords))
-
-                for src in sources:
-                    search_tasks.append(
-                        asyncio.create_task(
-                            _search_source(src, keywords),
-                            name=f"{dim_id}_{company_label}_{src}",
-                        )
-                    )
-
-        # Phase 3: Execute all searches in parallel
-        raw_results = await asyncio.gather(*search_tasks, return_exceptions=True)
-
-        # Phase 4: Convert results to evidence items
-        all_evidence: list[EvidenceItemDTO] = []
-        source_stats: dict[str, dict] = {}
-        coverage_by_dimension: dict[str, float] = {d["id"]: 0.0 for d in TEMPLATE_DIMENSIONS}
-
-        # Process website evidence first
-        for ev in our_website_ev + comp_website_ev:
-            all_evidence.append(EvidenceItemDTO(**ev))
-            dim = ev.get("category", "positioning")
-            coverage_by_dimension[dim] = min(
-                (coverage_by_dimension.get(dim, 0) or 0) + 20.0,
-                100.0,
-            )
-
-        # Process search results
-        for raw_result in raw_results:
-            if isinstance(raw_result, Exception):
-                continue
-
-            source_type, search_result = raw_result  # type: ignore[misc]
-            if not isinstance(search_result, SearchResult):
-                continue
-
-            # Track source
-            if source_type not in source_stats:
-                source_stats[source_type] = {"attempted": 0, "succeeded": 0, "failed": 0}
-            source_stats[source_type]["attempted"] += 1
-            if search_result.status in ("success", "fallback"):
-                source_stats[source_type]["succeeded"] += 1
-            else:
-                source_stats[source_type]["failed"] += 1
-
-            # Convert to evidence items
-            task_name = (
-                raw_result[0] if isinstance(raw_result, tuple) and len(raw_result) > 0 else ""
-            )
-            dim_id = "positioning"
-            company_label = "our"
-            # Try to extract dimension from evidence context
-            # (the evidence will carry the dimension via _to_evidence_items)
-
-            # We need a way to know which dimension this search was for.
-            # The search_tasks were created with name="{dim_id}_{company_label}_{src}".
-            # Since we lose the task name after gather, let's handle this differently:
-            # Each raw_result carries (source_type, SearchResult) tuple.
-            # We'll assign evidence to dimensions based on content matching.
-            items = _to_evidence_items(source_type, search_result, dim_id, company_label)
-            for item in items:
-                # Try to match content to dimensions
-                content = item.get("content", "").lower()
-                for dim in TEMPLATE_DIMENSIONS:
-                    for kw in dim["keywords"]:
-                        if kw.lower() in content:
-                            item["category"] = dim["id"]
-                            # Bump coverage
-                            coverage_by_dimension[dim["id"]] = min(
-                                (coverage_by_dimension.get(dim["id"], 0) or 0) + 5.0,
-                                100.0,
-                            )
-                            break
-                    else:
-                        continue
-                    break
-                all_evidence.append(EvidenceItemDTO(**item))
-
-        # Phase 5: Extract company & product info
-        our_company_info = self._extract_company_info(
-            our, all_evidence, label="our",
-        )
-        comp_company_info = self._extract_company_info(
-            competitor, all_evidence, label="competitor",
-        )
-        our_product_info = self._extract_product_info(
-            product, all_evidence, label="our",
-        )
-        comp_product_info = self._extract_product_info(
-            product, all_evidence, label="competitor",
+        1. Generate search queries
+        2. Execute Tavily searches
+        3. LLM extract evidence
+        4. Build output
+        """
+        objective = input_data.research_plan.objective if input_data.research_plan else (
+            f"分析 {input_data.competitor_company} 的 {input_data.product}"
         )
 
-        # Phase 6: Build EvidenceBundle
-        total_attempted = sum(s["attempted"] for s in source_stats.values())
-        total_succeeded = sum(s["succeeded"] for s in source_stats.values())
-        fallback_used = any(
-            r[1].status == "fallback"
-            for r in raw_results
-            if isinstance(r, tuple) and len(r) > 1
+        # Step 1: Generate search queries
+        queries = await self._generate_queries(objective, input_data)
+
+        # Step 2: Execute searches
+        all_results = await self._execute_searches(queries, input_data)
+
+        # Step 3: Extract evidence via LLM
+        evidence_items, search_summary = await self._extract_evidence(
+            queries, objective, all_results,
         )
 
-        avg_confidence = 0.0
-        if all_evidence:
-            conf_map = {"verified": 1.0, "likely": 0.8, "estimated": 0.5, "speculative": 0.3}
-            scores = [conf_map.get(e.confidence, 0.5) for e in all_evidence]
-            avg_confidence = sum(scores) / len(scores)
-
-        bundle = EvidenceBundleDTO(
-            our_company=our_company_info,
-            competitor_company=comp_company_info,
-            our_product=our_product_info,
-            competitor_product=comp_product_info,
-            evidence_items=all_evidence,
-            news=[e.model_dump() for e in all_evidence if e.source_type == "news"],
-            reviews=[e.model_dump() for e in all_evidence if e.source_type in ("app_store", "google_play")],
-            sources_used=[
-                {
-                    "type": st,
-                    "status": "success" if stats["succeeded"] > 0 else "no_data",
-                    "items_found": stats["succeeded"],
-                }
-                for st, stats in source_stats.items()
-            ],
-            references=[{"url": u} for u in dict.fromkeys([e.source for e in all_evidence if e.source.startswith("http")])],
-            quality_score={
-                "overall": round(avg_confidence * 100, 1),
-                "coverage": round(
-                    sum(v for v in coverage_by_dimension.values()) / max(len(coverage_by_dimension), 1),
-                    1,
-                ),
-                "freshness": 70.0,
-            },
+        # Step 4: Build output
+        bundle, quality = self._build_output(
+            input_data, evidence_items, all_results,
         )
-
-        quality = QualityReport(
-            sources_attempted=total_attempted,
-            sources_succeeded=total_succeeded,
-            total_evidence_items=len(all_evidence),
-            coverage_by_dimension=coverage_by_dimension,
-            avg_confidence=round(avg_confidence, 2),
-            fallback_used=fallback_used,
-            missing_data_warnings=[
-                f"[{dim}] 数据量较少" if v < 30 else ""
-                for dim, v in coverage_by_dimension.items()
-                if v < 30
-            ],
-        )
-
-        # Deduplicate warnings
-        quality.missing_data_warnings = [
-            w for w in quality.missing_data_warnings if w
-        ]
 
         output = ResearchOutput(
             evidence_bundle=bundle,
             quality_report=quality,
         )
-        return AgentResult(success=True, output=output)
+        return AgentResult(
+            success=True,
+            output=output,
+            phase_record={
+                "phase": Phase.RESEARCHING.value,
+                "duration_ms": 0,
+                "status": "completed",
+                "queries_used": queries,
+                "tavily_calls": len(queries),
+                "total_results": sum(len(r.items) for r in all_results),
+                "evidence_count": len(evidence_items),
+                "llm_generated": True,
+            },
+        )
 
-    # ── Info Extraction Helpers ──
+    # ── Step 1: Generate Search Queries ──
 
-    def _extract_company_info(
+    async def _generate_queries(
         self,
-        company_name: str,
-        evidence: list[EvidenceItemDTO],
-        label: str,
-    ) -> CompanyInfoDTO:
-        """Extract company-level information from collected evidence."""
-        # Find positioning evidence
-        pos_items = [
-            e for e in evidence
-            if e.category == "positioning" and company_name.lower() in e.content.lower()
+        objective: str,
+        input_data: ResearchInput,
+    ) -> list[str]:
+        """Use LLM to generate focused search queries."""
+        prompt = f"""分析目标：{objective}
+我方公司：{input_data.our_company}
+竞品公司：{input_data.competitor_company}
+分析产品：{input_data.product}
+
+请生成 3-5 个精准的搜索查询。"""
+
+        try:
+            result = await llm_client.generate(
+                system_prompt=_SEARCH_QUERY_SYSTEM,
+                user_prompt=prompt,
+                response_model=QueriesList,
+                temperature=0.5,
+            )
+            if result.parsed and result.parsed.queries:
+                return result.parsed.queries[:5]
+        except Exception:
+            pass
+
+        # Fallback: static queries based on input
+        return [
+            f"{input_data.competitor_company} {input_data.product} 分析",
+            f"{input_data.product} 用户 数据 2025",
+            f"{input_data.our_company} vs {input_data.competitor_company} 对比",
         ]
-        biz_items = [
-            e for e in evidence
-            if e.category == "business" and company_name.lower() in e.content.lower()
-        ]
-        growth_items = [
-            e for e in evidence
-            if e.category == "growth" and company_name.lower() in e.content.lower()
-        ]
 
-        pos_content = " | ".join(
-            dict.fromkeys([e.content[:300] for e in pos_items])
-        )
-        biz_content = " | ".join(
-            dict.fromkeys([e.content[:300] for e in biz_items])
-        )
-        growth_content = " | ".join(
-            dict.fromkeys([e.content[:300] for e in growth_items])
-        )
+    # ── Step 2: Execute Tavily Searches ──
 
-        has_real_data = any(
-            not e.confidence == "estimated" and not e.source.startswith("mock")
-            for e in pos_items + biz_items
-        )
-
-        return CompanyInfoDTO(
-            name=company_name,
-            description=pos_content[:500] if pos_content else "",
-            positioning=pos_content[:500] if pos_content else "",
-            business_model=biz_content[:300] if biz_content else "",
-            market_focus=growth_content[:200] if growth_content else "",
-            data_quality="high" if has_real_data else ("medium" if pos_content else "no_data"),
-        )
-
-    def _extract_product_info(
+    async def _execute_searches(
         self,
-        product_name: str,
-        evidence: list[EvidenceItemDTO],
-        label: str,
-    ) -> ProductInfoDTO:
-        """Extract product-level information from collected evidence."""
-        feat_items = [
-            e for e in evidence
-            if e.category == "features" and product_name.lower() in e.content.lower()
+        queries: list[str],
+        input_data: ResearchInput,
+    ) -> list[TavilyResult]:
+        """Execute Tavily searches concurrently for all queries."""
+        tasks = [
+            tavily_search(query, max_results=8, include_raw_content=False)
+            for query in queries
         ]
-        ux_items = [
-            e for e in evidence
-            if e.category == "ux" and product_name.lower() in e.content.lower()
-        ]
+        results: list[TavilyResult] = await asyncio.gather(*tasks)
+        return results
 
-        feat_content = " | ".join(
-            dict.fromkeys([e.content[:300] for e in feat_items])
-        )
-        ux_content = " | ".join(
-            dict.fromkeys([e.content[:300] for e in ux_items])
-        )
+    # ── Step 3: Extract Evidence via LLM ──
 
-        has_real_data = any(
-            not e.confidence == "estimated" and not e.source.startswith("mock")
-            for e in feat_items
-        )
+    async def _extract_evidence(
+        self,
+        queries: list[str],
+        objective: str,
+        all_results: list[TavilyResult],
+    ) -> tuple[list[EvidenceItemDTO], str]:
+        """Use LLM to extract structured evidence from search results.
 
-        # Extract platform hints from evidence
-        platform_keywords = {
-            "web": "Web", "app": "App", "iOS": "iOS",
-            "Android": "Android", "小程序": "小程序",
-        }
-        platforms_found = set()
-        for e in feat_items + ux_items:
-            for kw, platform in platform_keywords.items():
-                if kw.lower() in e.content.lower():
-                    platforms_found.add(platform)
+        Process each query-result pair independently, then merge.
+        """
+        all_evidence: list[EvidenceItemDTO] = []
+        evidence_counter = 0
+        all_summaries: list[str] = []
 
-        return ProductInfoDTO(
-            name=product_name,
-            description=feat_content[:500] if feat_content else "",
-            key_features=[
-                f"[{label}] {f}" for f in (
-                    self._guess_features(feat_content) if feat_content else [
-                        "核心功能模块A", "核心功能模块B",
-                    ]
+        for query, result in zip(queries, all_results):
+            if result.status != "success" or not result.items:
+                all_summaries.append(
+                    f"查询「{query}」：{result.status} ({result.error or '无结果'})"
                 )
+                continue
+
+            # Build JSON for LLM
+            results_json = json.dumps(
+                [
+                    {
+                        "title": r.get("title", ""),
+                        "url": r.get("url", ""),
+                        "content": r.get("content", "")[:500],
+                        "score": r.get("score", 0),
+                    }
+                    for r in result.items
+                ],
+                ensure_ascii=False,
+            )
+
+            try:
+                llm_result = await llm_client.generate(
+                    system_prompt=SYSTEM_PROMPT,
+                    user_prompt=build_extraction_prompt(
+                        query, objective, results_json,
+                    ),
+                    response_model=ExtractedEvidence,
+                    temperature=0.3,
+                )
+
+                if llm_result.parsed:
+                    parsed: ExtractedEvidence = llm_result.parsed
+                    for item in parsed.evidence_items:
+                        dto = EvidenceItemDTO(
+                        id=f"E{evidence_counter:03d}",
+                            title=item.title,
+                            source=item.source,
+                            url=item.url,
+                            date=item.date,
+                            content=item.summary,
+                            confidence=item.confidence,
+                            category=item.dimension,
+                            source_type="web",
+                            extracted_at=datetime.now(),
+                            raw_data={
+                                "dimension": item.dimension,
+                                "from_query": query,
+                            },
+                        )
+                        evidence_counter += 1
+                        all_evidence.append(dto)
+                    all_summaries.append(
+                        f"查询「{query}」：{parsed.search_summary}"
+                    )
+                else:
+                    all_summaries.append(
+                        f"查询「{query}」：LLM解析失败，返回 {len(result.items)} 条原始结果"
+                    )
+            except Exception as exc:
+                all_summaries.append(
+                    f"查询「{query}」：LLM调用失败 ({exc})"
+                )
+
+        # Deduplicate by URL
+        seen_urls: set[str] = set()
+        deduped: list[EvidenceItemDTO] = []
+        for e in all_evidence:
+            if e.url and e.url not in seen_urls:
+                seen_urls.add(e.url)
+                deduped.append(e)
+            elif not e.url:
+                # Keep items without URL (shouldn't happen, but safety)
+                deduped.append(e)
+
+        search_summary = " | ".join(all_summaries) if all_summaries else "无搜索执行"
+
+        return deduped, search_summary
+
+    # ── Step 4: Build Output ──
+
+    def _build_output(
+        self,
+        input_data: ResearchInput,
+        evidence_items: list[EvidenceItemDTO],
+        all_results: list[TavilyResult],
+    ) -> tuple[EvidenceBundleDTO, QualityReport]:
+        """Build EvidenceBundle and QualityReport from extracted evidence."""
+        total_results = sum(len(r.items) for r in all_results)
+        sources_used: list[dict] = []
+        seen_domains: set[str] = set()
+        for e in evidence_items:
+            if e.url:
+                from urllib.parse import urlparse
+                domain = urlparse(e.url).netloc
+                if domain not in seen_domains:
+                    seen_domains.add(domain)
+                    sources_used.append({"domain": domain, "url": e.url})
+
+        # Build company/product info from top evidence
+        our_items = [
+            e for e in evidence_items
+            if input_data.our_company.lower() in (e.title + e.content).lower()
+        ]
+        comp_items = [
+            e for e in evidence_items
+            if input_data.competitor_company.lower() in (e.title + e.content).lower()
+        ]
+
+        bundle = EvidenceBundleDTO(
+            our_company=CompanyInfoDTO(
+                name=input_data.our_company,
+                description=self._join_evidence(our_items[:3]),
+                data_quality="medium" if our_items else "no_data",
+            ),
+            competitor_company=CompanyInfoDTO(
+                name=input_data.competitor_company,
+                description=self._join_evidence(comp_items[:3]),
+                data_quality="medium" if comp_items else "no_data",
+            ),
+            our_product=ProductInfoDTO(
+                name=input_data.product,
+                description=self._join_evidence(our_items[:2]),
+                data_quality="medium" if our_items else "no_data",
+            ),
+            competitor_product=ProductInfoDTO(
+                name=input_data.product,
+                description=self._join_evidence(comp_items[:2]),
+                data_quality="medium" if comp_items else "no_data",
+            ),
+            evidence_items=evidence_items,
+            news=[],
+            reviews=[],
+            market=[],
+            sources_used=sources_used,
+            references=[
+                {"url": e.url, "title": e.title} for e in evidence_items if e.url
             ],
-            target_users=ux_content[:200] if ux_content else "",
-            platforms=list(platforms_found) if platforms_found else ["Web"],
-            data_quality="high" if has_real_data else ("medium" if feat_content else "no_data"),
+            quality_score={
+                "overall": min(100, len(evidence_items) * 10),
+                "coverage": min(100, len(sources_used) * 10),
+                "freshness": 70,  # Tavily tends to return recent results
+            },
         )
+
+        # Calculate dimension coverage
+        dimensions: dict[str, int] = {}
+        for e in evidence_items:
+            dim = e.category or "other"
+            dimensions[dim] = dimensions.get(dim, 0) + 1
+        coverage_by_dimension: dict[str, float] = {}
+        for dim, count in dimensions.items():
+            coverage_by_dimension[dim] = min(100.0, count * 20.0)
+
+        # Average confidence
+        conf_weights = {"high": 1.0, "medium": 0.6, "low": 0.3, "estimated": 0.1}
+        avg_conf = (
+            sum(conf_weights.get(e.confidence, 0.3) for e in evidence_items)
+            / max(len(evidence_items), 1)
+        )
+
+        quality = QualityReport(
+            sources_attempted=max(len(all_results), 1),
+            sources_succeeded=sum(1 for r in all_results if r.status == "success"),
+            total_evidence_items=len(evidence_items),
+            coverage_by_dimension=coverage_by_dimension,
+            avg_confidence=round(avg_conf, 2),
+            fallback_used=False,
+            missing_data_warnings=(
+                ["TAVILY_API_KEY 未配置，无法执行真实搜索"]
+                if not evidence_items and not total_results
+                else []
+            ),
+        )
+
+        return bundle, quality
 
     @staticmethod
-    def _guess_features(content: str) -> list[str]:
-        """Simple heuristic: extract bullet / list items as potential features."""
-        features: list[str] = []
-        # Look for Chinese bullet markers
-        for line in content.split("。"):
-            line = line.strip()
-            if any(marker in line for marker in ["功能", "支持", "提供", "具备", "包括"]):
-                features.append(line[:60])
-                if len(features) >= 5:
-                    break
-        if not features:
-            features = ["核心功能模块（详见证据内容）"]
-        return features
+    def _join_evidence(items: list[EvidenceItemDTO]) -> str:
+        if not items:
+            return ""
+        return " | ".join(
+            e.content[:200] for e in items if e.content
+        )

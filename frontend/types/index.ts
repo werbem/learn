@@ -122,3 +122,14 @@ export const PHASE_ORDER: Record<string, number> = {
   review_failed: 9,
   need_more_research: 9,
 };
+
+// SSE streaming types
+export interface StreamEvent {
+  event_type: "phase_update" | "done" | "heartbeat";
+  agent?: string;
+  status?: "running" | "completed";
+  message?: string;
+  progress?: number;
+  timestamp: number;
+  data?: Record<string, unknown>;
+}

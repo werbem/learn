@@ -74,7 +74,10 @@ class Settings(BaseSettings):
     # OpenAI — reads from OPENAI_API_KEY env var (no hardcoded default)
     openai_api_key: str = ""  # from OPENAI_API_KEY
     openai_model: str = "gpt-4o-mini"  # from OPENAI_MODEL
+    openai_base_url: str = ""  # from OPENAI_BASE_URL
 
+    # Tavily Search — reads from TAVILY_API_KEY env var
+    tavily_api_key: str = ""  # from TAVILY_API_KEY
     # Legacy / alternative — reads from LLM_API_KEY (kept for backward compat)
     llm_api_key: str = ""
 

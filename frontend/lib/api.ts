@@ -23,10 +23,11 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
   return res.json();
 }
 
-export async function createReport(input: AnalysisInput): Promise<ReportCreateResponse> {
+export async function createReport(input: AnalysisInput, signal?: AbortSignal): Promise<ReportCreateResponse> {
   return request<ReportCreateResponse>(`${API_PREFIX}/reports`, {
     method: "POST",
     body: JSON.stringify(input),
+    signal,
   });
 }
 
@@ -40,4 +41,51 @@ export async function getProgress(taskId: string): Promise<TaskProgressResponse>
 
 export async function listReports(): Promise<{ reports: ReportDetailResponse[]; total: number }> {
   return request(`${API_PREFIX}/reports`);
+}
+
+// ── SSE Streaming ──
+
+export function subscribeProgress(
+  taskId: string,
+  onEvent: (event: import("@/types").StreamEvent) => void,
+  onDone: (status: string) => void,
+  onError?: (err: Event) => void,
+): EventSource {
+  const url = `${API_PREFIX}/tasks/${taskId}/stream`;
+  const es = new EventSource(url);
+
+  es.addEventListener("phase_update", (e: MessageEvent) => {
+    try {
+      const data = JSON.parse(e.data);
+      onEvent(data);
+    } catch {
+      // ignore parse errors
+    }
+  });
+
+  es.addEventListener("done", (e: MessageEvent) => {
+    try {
+      const data = JSON.parse(e.data);
+      const status = data.status || "completed";
+      onDone(status);
+      es.close();
+    } catch {
+      onDone("completed");
+      es.close();
+    }
+  });
+
+  es.addEventListener("heartbeat", () => {
+    // Keep-alive, no action needed
+  });
+
+  es.onerror = (err) => {
+    onError?.(err);
+  };
+
+  return es;
+}
+
+export async function deleteReport(taskId: string): Promise<void> {
+  await request(`${API_PREFIX}/reports/${taskId}`, { method: "DELETE" });
 }

@@ -1,18 +1,21 @@
-"""Tasks API — progress tracking & human-in-the-loop."""
+"""Tasks API — progress tracking & real-time SSE streaming."""
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from typing import Optional
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
 
 from app.application.dto.task_dto import (
     PhaseRecordDTO,
     TaskDecisionRequest,
     TaskProgressResponse,
 )
+from app.infrastructure.workflow.stream import subscribe, cleanup
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
 
@@ -37,8 +40,7 @@ def _register_task(task_id: str) -> None:
 
 @router.get("/{task_id}/progress", response_model=TaskProgressResponse)
 async def get_task_progress(task_id: UUID) -> TaskProgressResponse:
-    """Get the current progress of an analysis task."""
-    from app.infrastructure.workflow.graph import workflow_graph
+    """Get the current progress of an analysis task (polling)."""
     from app.interfaces.api.routes.reports import _tasks as report_tasks
 
     task_str = str(task_id)
@@ -65,6 +67,39 @@ async def get_task_progress(task_id: UUID) -> TaskProgressResponse:
             for h in (history or [])
         ],
         created_at=datetime.utcnow(),
+    )
+
+
+@router.get("/{task_id}/stream")
+async def stream_task_progress(task_id: UUID):
+    """SSE endpoint — streams workflow events in real time.
+
+    Returns Server-Sent Events with:
+      event: phase_update  — agent status changes
+      event: done          — workflow complete
+      event: heartbeat     — keep-alive (every 30s)
+
+    Client: new EventSource("/api/tasks/{task_id}/stream")
+    """
+    task_str = str(task_id)
+
+    async def event_generator():
+        try:
+            async for event in subscribe(task_str, timeout=600.0):
+                event_type = event.get("event_type", "heartbeat")
+                yield f"event: {event_type}\n"
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+        finally:
+            cleanup(task_str)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
     )
 
 

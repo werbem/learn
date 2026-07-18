@@ -71,8 +71,8 @@ class TestPlannerAgent:
         self._validate_plan(plan, expected_companies=["飞猪", "携程", "美团"])
 
         # Check it's not the default mock
-        is_mock = plan.objective == "product_improvement"
-        assert not is_mock, "Plan should be LLM-generated, not mock fallback"
+        is_mock = not result.output.phase_record.get("llm_generated", False)
+        assert not is_mock, f"Plan should be LLM-generated, not mock fallback. phase_record={result.output.phase_record}"
 
     @pytest.mark.asyncio
     async def test_scenario_美团酒店增长(self):
@@ -94,8 +94,8 @@ class TestPlannerAgent:
 
         self._validate_plan(plan, expected_companies=["美团", "携程", "飞猪"])
 
-        is_mock = plan.objective == "product_improvement"
-        assert not is_mock, "Plan should be LLM-generated, not mock fallback"
+        is_mock = not result.output.phase_record.get("llm_generated", False)
+        assert not is_mock, f"Plan should be LLM-generated, not mock fallback. phase_record={result.output.phase_record}"
 
     @pytest.mark.asyncio
     async def test_two_scenarios_different(self):

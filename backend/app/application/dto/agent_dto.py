@@ -72,8 +72,11 @@ class PlannerOutput(BaseModel):
 
 class EvidenceItemDTO(BaseModel):
     id: Optional[str] = None
+    title: str = ""
     source: str
     source_type: str = "web"
+    url: str = ""
+    date: str = ""
     content: str
     confidence: str = "estimated"
     category: str = ""
@@ -219,6 +222,7 @@ class RiskItem(BaseModel):
 
 
 class RecommendationItem(BaseModel):
+    expected_value: str = ""
     action: str
     rationale: str
     priority: str = "p2"

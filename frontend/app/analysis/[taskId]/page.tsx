@@ -5,13 +5,13 @@ import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { ProgressTracker } from "@/components/progress-tracker";
-import { createReport, getProgress } from "@/lib/api";
+import { createReport, getProgress, subscribeProgress } from "@/lib/api";
 import { saveToHistory } from "@/lib/utils";
-import type { AnalysisInput, PhaseRecord } from "@/types";
+import type { AnalysisInput, PhaseRecord, StreamEvent } from "@/types";
 import { PHASE_LABELS, PHASE_ORDER } from "@/types";
 
 const POLL_INTERVAL = 800;
-const MAX_WAIT_SECONDS = 300;
+const MAX_WAIT_SECONDS = 600;
 
 type PageState =
   | { type: "loading"; taskId: string }
@@ -20,6 +20,17 @@ type PageState =
   | { type: "completed"; taskId: string }
   | { type: "error"; message: string }
   | { type: "timeout" };
+
+
+const AGENT_TO_PHASE: Record<string, string> = {
+  gate: "validated",
+  planner: "planned",
+  research: "researched",
+  compare: "compared",
+  strategy: "strategized",
+  report: "reported",
+  review: "reviewed",
+};
 
 export default function AnalysisProgressPage({
   params,
@@ -31,6 +42,7 @@ export default function AnalysisProgressPage({
   const [phase, setPhase] = useState("");
   const [progress, setProgress] = useState(0);
   const [phaseHistory, setPhaseHistory] = useState<PhaseRecord[]>([]);
+  const [eta, setEta] = useState<string>("");
   const startTime = useRef(Date.now());
 
   // Resolve taskId from params and check for pending task
@@ -61,7 +73,19 @@ export default function AnalysisProgressPage({
 
     const doCreate = async () => {
       try {
-        const result = await createReport(state.payload);
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 30000);
+        let result;
+        try {
+          result = await createReport(state.payload, controller.signal);
+        } catch (err: any) {
+          if (err.name === "AbortError") {
+            setState({ type: "polling", taskId: state.taskId, serverTaskId: state.taskId });
+          }
+          throw err;
+        } finally {
+          clearTimeout(timeoutId);
+        }
         saveToHistory({
           taskId: result.task_id,
           ourCompany: state.payload.our_company,
@@ -81,7 +105,60 @@ export default function AnalysisProgressPage({
     doCreate();
   }, [state, router]);
 
-  // Poll progress
+  // ── SSE Streaming (parallel to polling) ──
+  useEffect(() => {
+    if (state.type !== "polling") return;
+
+    const es = subscribeProgress(
+      state.serverTaskId,
+      (event: StreamEvent) => {
+        if (event.event_type === "phase_update") {
+          if (event.status === "running") {
+            setPhase(AGENT_TO_PHASE[event.agent || ""] || event.agent || "");
+          }
+          if (event.progress !== undefined) {
+            setProgress(event.progress);
+          }
+          // Phase-based ETA (more stable than progress-based)
+          const phaseOrder = ["validated","planned","researched","compared","strategized","reported","reviewed","completed"];
+          const phaseName = AGENT_TO_PHASE[event.agent || ""] || event.agent || "";
+          const currentIdx = phaseOrder.indexOf(phaseName);
+          if (currentIdx >= 0) {
+            const elapsed = Math.max(1, (Date.now() - startTime.current) / 1000);
+            // Show "计算中..." until we have at least 2 completed phases
+            if (currentIdx < 1) {
+              setEta("计算中...");
+            } else {
+              const avgPerPhase = elapsed / currentIdx;
+              const phasesLeft = phaseOrder.length - currentIdx - 1;
+              const remaining = avgPerPhase * phasesLeft;
+              const mins = Math.floor(remaining / 60);
+              const secs = Math.floor(remaining % 60);
+              setEta(mins > 0 ? `大约还需 ${mins} 分 ${secs} 秒` : `大约还需 ${secs} 秒`);
+            }
+          }
+        }
+      },
+      (status: string) => {
+        // SSE updates UI only — polling handles redirect
+        if (status === "completed") {
+          setPhase("completed");
+          setProgress(100);
+        } else if (status === "failed" || status === "need_more_research" || status === "review_failed") {
+          // Don't set error here — polling handles the final decision
+          // (may still redirect if report exists)
+        }
+      }
+    );
+
+    // Store ref for cleanup
+    const esRef = es;
+    return () => {
+      esRef?.close();
+    };
+  }, [state, router]);
+
+  // Poll progress (kept for fallback)
   useEffect(() => {
     if (state.type !== "polling") return;
 
@@ -101,11 +178,45 @@ export default function AnalysisProgressPage({
 
         if (data.status === "completed") {
           clearInterval(interval);
+          const pendingRaw = sessionStorage.getItem("pending_analysis");
+          let historyData = { ourCompany: "", competitorCompany: "", product: "", objective: "" };
+          if (pendingRaw) {
+            try {
+              const pending = JSON.parse(pendingRaw);
+              historyData = pending.payload || historyData;
+            } catch {}
+          }
+          saveToHistory({
+            taskId: state.serverTaskId,
+            ...historyData,
+          });
           await new Promise((r) => setTimeout(r, 500));
           setState({ type: "completed", taskId: state.serverTaskId });
           router.push(`/report/${state.serverTaskId}`);
         } else if (data.status === "failed" || data.status === "review_failed") {
           clearInterval(interval);
+          // Try to load the report — it may have been generated despite review failure
+          try {
+            const { getReport } = await import("@/lib/api");
+            const report = await getReport(state.serverTaskId);
+            if (report && report.sections?.length > 0) {
+              // Report exists! Save history and redirect
+              const pendingRaw = sessionStorage.getItem("pending_analysis");
+              let historyData = { ourCompany: "", competitorCompany: "", product: "", objective: "" };
+              if (pendingRaw) {
+                try {
+                  const pending = JSON.parse(pendingRaw);
+                  historyData = pending.payload || historyData;
+                } catch {}
+              }
+              saveToHistory({ taskId: state.serverTaskId, ...historyData });
+              setState({ type: "completed", taskId: state.serverTaskId });
+              router.push(`/report/${state.serverTaskId}`);
+              return;
+            }
+          } catch {
+            // Report not found — continue to error
+          }
           setState({ type: "error", message: data.error_info || "分析任务失败" });
         } else if (data.status === "need_more_research") {
           clearInterval(interval);
@@ -212,6 +323,11 @@ export default function AnalysisProgressPage({
         <p className="text-muted-foreground text-sm">
           AI 正在收集情报并进行深度分析，请稍候...
         </p>
+        {eta && (
+          <p className="text-sm font-medium text-primary animate-pulse">
+            ⏱️ {eta}
+          </p>
+        )}
       </div>
       <Card className="p-6">
         <ProgressTracker

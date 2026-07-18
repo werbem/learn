@@ -51,3 +51,13 @@ export function getHistory(): Array<{
   const existing = localStorage.getItem(key);
   return existing ? JSON.parse(existing) : [];
 }
+
+export function removeFromHistory(taskId: string) {
+  if (typeof window === "undefined") return;
+  const key = "analysis_history";
+  const existing = localStorage.getItem(key);
+  if (!existing) return;
+  const history = JSON.parse(existing);
+  const filtered = history.filter((h: { taskId: string }) => h.taskId !== taskId);
+  localStorage.setItem(key, JSON.stringify(filtered));
+}

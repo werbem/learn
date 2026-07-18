@@ -68,6 +68,25 @@ def _build_json_schema(model_class: type[BaseModel]) -> dict:
     return schema
 
 
+
+def _describe_schema(model_class: type[BaseModel]) -> str:
+    """Build a human-readable description of a Pydantic model's expected fields."""
+    schema = model_class.model_json_schema()
+    props = schema.get("properties", {})
+    required = schema.get("required", [])
+    lines = ["{"]
+    for key, prop in props.items():
+        ptype = prop.get("type", "string")
+        desc = prop.get("description", "")
+        req = " (必填)" if key in required else ""
+        if ptype == "array":
+            items = prop.get("items", {})
+            lines.append(f'  "{key}": [{items.get("type", "string")}]  // {desc}{req}')
+        else:
+            lines.append(f'  "{key}": "{ptype}"  // {desc}{req}')
+    lines.append("}")
+    return "\n".join(lines)
+
 def _parse_response(
     content: str,
     response_model: type[BaseModel] | None,
@@ -180,13 +199,12 @@ class LLMClient:
 
     def _client(self) -> AsyncOpenAI:
         if self._openai_client is None:
-            self._openai_client = AsyncOpenAI(
-                api_key=self.api_key,
-                timeout=_TIMEOUT,
-                max_retries=0,  # we handle retries ourselves
-            )
+            kwargs: dict[str, Any] = {"api_key": self.api_key}
+            base_url = settings.openai_base_url
+            if base_url:
+                kwargs["base_url"] = base_url
+            self._openai_client = AsyncOpenAI(**kwargs)
         return self._openai_client
-
     # ── OpenAI Implementation ──
 
     async def _generate_openai(
@@ -243,6 +261,21 @@ class LLMClient:
                     duration_ms=0,
                 )
             except APIError as exc:
+                # Fallback: json_schema → json_object for providers that
+                # don't support strict structured output (e.g., DeepSeek)
+                err_msg = str(exc)
+                if ("response_format" in err_msg and
+                        response_model is not None and
+                        kwargs.get("response_format", {}).get("type") == "json_schema"):
+                    kwargs["response_format"] = {"type": "json_object"}
+                    # Inject schema into prompt for json_object mode
+                    schema_fields = _describe_schema(response_model)
+                    kwargs["messages"][-1]["content"] += (
+                        "\n\n【输出格式要求】请严格输出以下JSON结构，不要添加或缺少字段：\n" +
+                        schema_fields
+                    )
+                    continue
+
                 last_error = exc
                 if attempt < _RETRY_MAX - 1:
                     wait = _RETRY_BASE_DELAY * (2 ** attempt)

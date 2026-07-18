@@ -4,6 +4,25 @@ import { cn } from "@/lib/utils";
 import { PHASE_LABELS, PHASE_ORDER } from "@/types";
 import type { PhaseRecord } from "@/types";
 
+// Map backend phase names to step keys
+const PHASE_TO_STEP: Record<string, string> = {
+  gate: "validated",
+  planner: "planned",
+  research: "researched",
+  compare: "compared",
+  strategy: "strategized",
+  report: "reported",
+  review: "reviewed",
+  validated: "validated",
+  planned: "planned",
+  researched: "researched",
+  compared: "compared",
+  strategized: "strategized",
+  reported: "reported",
+  reviewed: "reviewed",
+  completed: "completed",
+};
+
 const STEPS = [
   "validated",
   "planned",
@@ -44,7 +63,8 @@ export function ProgressTracker({ currentPhase, phaseHistory, progress }: Progre
       <div className="space-y-2">
         {STEPS.map((step, idx) => {
           const phase = phaseHistory.find((p) => p.phase === step);
-          const isActive = currentPhase === step;
+          const activeStep = PHASE_TO_STEP[currentPhase] || "";
+          const isActive = activeStep === step || currentPhase === step;
           const isPast = currentIdx > idx;
           const isFailed = phase?.status === "failed";
           const label = PHASE_LABELS[step] || step;
