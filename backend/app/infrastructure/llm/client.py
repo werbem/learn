@@ -122,8 +122,8 @@ class LLMClient:
 
     def __init__(self) -> None:
         self.provider = settings.llm_provider
-        self.model = settings.llm_model
-        self.api_key = settings.llm_api_key
+        self.model = settings.effective_model
+        self.api_key = settings.effective_api_key
         self._openai_client: AsyncOpenAI | None = None
 
     # ── Public API ──
