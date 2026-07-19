@@ -11,7 +11,7 @@ from app.application.dto.agent_dto import (
 from app.config.constants import Phase
 from app.infrastructure.agents.base import AgentContext, AgentResult, BaseAgent
 from app.infrastructure.agents.compare_prompt import (
-    SYSTEM_PROMPT, build_compare_prompt, _normalize_llm_output,
+    SYSTEM_PROMPT, build_compare_prompt, build_cluster_compare_prompt, _normalize_llm_output,
 )
 from app.infrastructure.llm.client import llm_client
 
@@ -32,7 +32,9 @@ class CompareAgent(BaseAgent[CompareInput, CompareOutput]):
             key=lambda e: {"high": 0, "medium": 1, "low": 2, "estimated": 3}.get(e.confidence, 3),
         )[:12]
 
-        if not evidence_items:
+        clusters = input_data.evidence_clusters or []
+
+        if not evidence_items and not clusters:
             return AgentResult(success=True, output=CompareOutput(
                 gap_analysis=GapAnalysis(),
                 evidence_references_count=0,
@@ -45,16 +47,31 @@ class CompareAgent(BaseAgent[CompareInput, CompareOutput]):
             for e in evidence_items
         ], ensure_ascii=False, indent=2)
 
+        clusters_json = json.dumps(clusters, ensure_ascii=False, indent=2)
+
+        # Use cluster-aware prompt when clusters available, else legacy
+        if clusters:
+            user_prompt = build_cluster_compare_prompt(
+                our_company=input_data.our_company,
+                competitor_company=input_data.competitor_company,
+                product=input_data.product,
+                clusters_json=clusters_json,
+                evidence_json=evidence_json,
+                analysis_scope=input_data.analysis_scope,
+            )
+        else:
+            user_prompt = build_compare_prompt(
+                our_company=input_data.our_company,
+                competitor_company=input_data.competitor_company,
+                product=input_data.product,
+                evidence_json=evidence_json,
+                analysis_scope=input_data.analysis_scope,
+            )
+
         try:
             result = await llm_client.generate(
                 system_prompt=SYSTEM_PROMPT,
-                user_prompt=build_compare_prompt(
-                    our_company=input_data.our_company,
-                    competitor_company=input_data.competitor_company,
-                    product=input_data.product,
-                    evidence_json=evidence_json,
-                    analysis_scope=input_data.analysis_scope,
-                ),
+                user_prompt=user_prompt,
                 response_model=None,
                 temperature=0.4,
             )
@@ -111,10 +128,12 @@ class CompareAgent(BaseAgent[CompareInput, CompareOutput]):
     def _build_gap_analysis(self, parsed, _evidence_items) -> GapAnalysis:
         fm = []
         for d in parsed.differences:
+            cluster_refs = getattr(d, 'cluster_refs', []) or []
             fm.append(FeatureItem(
                 category=d.dimension, feature_name=d.title,
                 our_coverage=d.our_status, competitor_coverage=d.competitor_status,
                 differentiator=True, evidence_refs=d.evidence_refs,
+                cluster_refs=cluster_refs,
             ).model_dump())
 
         pos = {}
@@ -132,7 +151,9 @@ class CompareAgent(BaseAgent[CompareInput, CompareOutput]):
                 "capability_gaps": [GapItem(
                     dimension=cg.dimension,
                     description=f"{cg.title}: 我={cg.our_status} vs 竞={cg.competitor_status}. 用户:{cg.user_impact}. 业务:{cg.business_impact}",
-                    evidence_refs=cg.evidence_refs, impact="high",
+                    evidence_refs=cg.evidence_refs,
+                    cluster_refs=getattr(cg, "cluster_refs", []) or [],
+                    impact="high",
                 ).model_dump() for cg in parsed.capability_gaps],
             },
             evidence_references=sorted(set(ref for d in parsed.differences for ref in d.evidence_refs)),

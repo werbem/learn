@@ -10,6 +10,8 @@ from typing import Any, Generic, TypeVar
 from pydantic import BaseModel
 
 from app.config.constants import ErrorCategory, Phase
+from app.infrastructure.trace import trace_collector, TraceStatus
+from app.infrastructure.trace.snapshot import capture_input_snapshot, capture_output_snapshot
 
 InputT = TypeVar("InputT", bound=BaseModel)
 OutputT = TypeVar("OutputT", bound=BaseModel)
@@ -76,8 +78,20 @@ class BaseAgent(ABC, Generic[InputT, OutputT]):
         ctx: AgentContext,
         input_data: InputT,
     ) -> AgentResult:
-        """Wrapper with timing, error boundary, and phase tracking."""
+        """Wrapper with timing, error boundary, phase tracking, and trace."""
         start = datetime.now()
+
+        # --- Trace: agent start ---
+        inp = input_data.model_dump() if hasattr(input_data, "model_dump") else str(input_data)
+        input_summary = str(inp)[:200]
+        trace = trace_collector.start_trace(
+            task_id=ctx.task_id,
+            stage="agent",
+            agent_name=self.agent_name,
+            input_summary=input_summary,
+            metadata={"input_snapshot": capture_input_snapshot(self.agent_name, input_data)},
+        )
+        # ---
         try:
             result = await self.arun(ctx, input_data)
             result.duration_ms = int(
@@ -89,6 +103,22 @@ class BaseAgent(ABC, Generic[InputT, OutputT]):
                 "duration_ms": result.duration_ms,
                 "status": "completed" if result.success else "failed",
             }
+
+            # --- Trace: agent end ---
+            out = result.output.model_dump() if hasattr(result.output, "model_dump") else str(result.output)
+            trace_collector.end_trace(
+                trace,
+                success=result.success,
+                output_summary=str(out)[:300],
+                error=result.error.get("message") if result.error else None,
+                metadata={
+                    "duration_ms": result.duration_ms,
+                    "phase": self.phase.value,
+                    "output_snapshot": capture_output_snapshot(self.agent_name, result.output, result.success),
+                },
+            )
+            # ---
+
             return result
         except Exception as exc:
             elapsed = int((datetime.now() - start).total_seconds() * 1000)
@@ -110,3 +140,17 @@ class BaseAgent(ABC, Generic[InputT, OutputT]):
                     "error": {"code": ErrorCategory.LLM_ERROR.value, "message": str(exc)},
                 },
             )
+
+            # --- Trace: agent exception ---
+            trace_collector.end_trace(
+                trace,
+                success=False,
+                output_summary=f"Exception: {exc}",
+                error=str(exc),
+                metadata={
+                    "duration_ms": elapsed,
+                    "phase": self.phase.value,
+                    "output_snapshot": {"success": False, "error": str(exc)[:200]},
+                },
+            )
+            # ---

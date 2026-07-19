@@ -2,15 +2,8 @@ export interface AnalysisInput {
   our_company: string;
   competitor_company: string;
   product: string;
-  objective: 
-    | "product_improvement"
-    | "go_to_market"
-    | "investment_due_diligence"
-    | "competitive_defense"
-    | "positioning_switch"
-    | "partnership_evaluation"
-    | "feature_benchmark"
-    | "__custom__";
+  objective: string;
+  scene?: string;
   optional?: Record<string, unknown>;
 }
 

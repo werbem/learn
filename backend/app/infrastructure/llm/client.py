@@ -21,6 +21,7 @@ from openai import APIError, APITimeoutError, AsyncOpenAI, RateLimitError
 from pydantic import BaseModel, ValidationError
 
 from app.config.settings import settings
+from app.infrastructure.trace import trace_collector
 
 
 # ── Retry Configuration ──
@@ -70,32 +71,25 @@ def _build_json_schema(model_class: type[BaseModel]) -> dict:
 
 
 def _describe_schema(model_class: type[BaseModel]) -> str:
-    """Build a human-readable description of a Pydantic model's expected fields."""
-    schema = model_class.model_json_schema()
-    props = schema.get("properties", {})
-    required = schema.get("required", [])
-    lines = ["{"]
-    for key, prop in props.items():
-        ptype = prop.get("type", "string")
-        desc = prop.get("description", "")
-        req = " (必填)" if key in required else ""
-        if ptype == "array":
-            items = prop.get("items", {})
-            lines.append(f'  "{key}": [{items.get("type", "string")}]  // {desc}{req}')
-        else:
-            lines.append(f'  "{key}": "{ptype}"  // {desc}{req}')
-    lines.append("}")
-    return "\n".join(lines)
+    """Build full JSON Schema dump for prompt injection (supports nested structures)."""
+    import json
+    return json.dumps(model_class.model_json_schema(), indent=2, ensure_ascii=False)
 
 def _parse_response(
     content: str,
     response_model: type[BaseModel] | None,
+    attempt_repair: bool = False,
 ) -> tuple[str, BaseModel | None]:
-    """Parse JSON response into Pydantic model with retry."""
+    """Parse JSON response into Pydantic model with repair retry.
+
+    When initial parsing fails and attempt_repair is False, returns (content, None)
+    so the caller can trigger LLM-assisted repair via _call_openai.
+    """
     if response_model is None:
         return content, None
 
     # Try direct JSON parse
+    last_error = None
     try:
         # Strip markdown code fences if present
         cleaned = content.strip()
@@ -107,20 +101,26 @@ def _parse_response(
             cleaned = cleaned.rsplit("```", 1)[0]
 
         data = json.loads(cleaned)
+        # Check for parse_failed sentinel (DeepSeek may return this)
+        if isinstance(data, dict) and data.get("parse_failed"):
+            return content, None  # LLM admitted failure
         parsed = response_model.model_validate(data)
         return content, parsed
     except (json.JSONDecodeError, ValidationError) as exc:
+        last_error = exc
         # Fallback: try to find JSON in the response
         import re
         json_match = re.search(r"\{.*\}", content, re.DOTALL)
         if json_match:
             try:
                 data = json.loads(json_match.group())
+                if isinstance(data, dict) and data.get("parse_failed"):
+                    return content, None
                 parsed = response_model.model_validate(data)
                 return content, parsed
             except (json.JSONDecodeError, ValidationError):
                 pass
-        # If all parsing fails, return raw content
+        # If all parsing fails, return raw content with error info
         return content, None
 
 
@@ -144,6 +144,7 @@ class LLMClient:
         self.model = settings.effective_model
         self.api_key = settings.effective_api_key
         self._openai_client: AsyncOpenAI | None = None
+        self._base_url = settings.openai_base_url
 
     # ── Public API ──
 
@@ -161,6 +162,17 @@ class LLMClient:
         """
         start = datetime.now()
 
+        # --- Trace: LLM call start ---
+        input_snip = user_prompt[:200].replace("\n", " ")
+        trace = trace_collector.start_trace(
+            task_id="",  # caller should set via metadata
+            stage="llm_client",
+            agent_name="",
+            input_summary=f"model={self.model}, prompt={input_snip}",
+            metadata={"provider": self.provider.value, "model": self.model},
+        )
+        # ---
+
         if self._use_openai():
             result = await self._generate_openai(
                 system_prompt, user_prompt, response_model, temperature,
@@ -170,6 +182,21 @@ class LLMClient:
 
         elapsed = int((datetime.now() - start).total_seconds() * 1000)
         result.duration_ms = elapsed
+
+        # --- Trace: LLM call end ---
+        trace_collector.end_trace(
+            trace,
+            success=not result.content.startswith("["),
+            output_summary=f"tokens: {result.prompt_tokens}+{result.completion_tokens}, model: {result.model}",
+            metadata={
+                "prompt_tokens": result.prompt_tokens,
+                "completion_tokens": result.completion_tokens,
+                "duration_ms": elapsed,
+                "model": result.model,
+            },
+        )
+        # ---
+
         return result
 
     async def stream(

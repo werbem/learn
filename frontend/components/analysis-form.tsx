@@ -42,9 +42,7 @@ export function AnalysisForm() {
       competitor_company: form.competitor_company.trim(),
       product: form.product.trim(),
       objective: isObjectiveCustom ? "product_improvement" : form.objective,
-      optional: isObjectiveCustom
-        ? { additional_objective: form.customObjective?.trim() }
-        : undefined,
+      scene: isObjectiveCustom ? form.customObjective?.trim() : undefined,
     };
 
     // Save to sessionStorage so analysis page can pick it up
@@ -72,7 +70,7 @@ export function AnalysisForm() {
               <label className="text-sm font-medium">我方公司 *</label>
               <input
                 className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                placeholder="例：字节跳动"
+                placeholder="例：飞猪"
                 value={form.our_company}
                 onChange={(e) => setForm({ ...form, our_company: e.target.value })}
               />
@@ -81,7 +79,7 @@ export function AnalysisForm() {
               <label className="text-sm font-medium">竞品公司 *</label>
               <input
                 className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                placeholder="例：腾讯"
+                placeholder="例：美团"
                 value={form.competitor_company}
                 onChange={(e) => setForm({ ...form, competitor_company: e.target.value })}
               />
@@ -92,7 +90,7 @@ export function AnalysisForm() {
             <label className="text-sm font-medium">分析产品 *</label>
             <input
               className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-              placeholder="例：抖音"
+              placeholder="例：酒店"
               value={form.product}
               onChange={(e) => setForm({ ...form, product: e.target.value })}
             />
@@ -103,7 +101,7 @@ export function AnalysisForm() {
             <select
               className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
               value={form.objective}
-              onChange={(e) => setForm({ ...form, objective: e.target.value as AnalysisInput["objective"] })}
+              onChange={(e) => setForm({ ...form, objective: e.target.value })}
             >
               {OBJECTIVE_OPTIONS.map(({ value, label }) => (
                 <option key={value} value={value}>{label}</option>

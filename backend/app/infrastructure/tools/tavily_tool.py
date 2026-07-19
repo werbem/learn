@@ -8,6 +8,7 @@ from typing import Any
 import httpx
 
 from app.config.settings import settings
+from app.infrastructure.trace import trace_collector, TraceStatus
 
 _TAVILY_API = "https://api.tavily.com/search"
 _HTTP_TIMEOUT = 30.0

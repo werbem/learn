@@ -82,6 +82,7 @@ class EvidenceItemDTO(BaseModel):
     category: str = ""
     extracted_at: Optional[datetime] = None
     raw_data: Optional[dict] = None
+    quality_score: Optional[dict] = None
 
 
 class CompanyInfoDTO(BaseModel):
@@ -114,7 +115,7 @@ class EvidenceBundleDTO(BaseModel):
     news: list[dict] = Field(default_factory=list)
     reviews: list[dict] = Field(default_factory=list)
     market: list[dict] = Field(default_factory=list)
-    sources_used: list[dict] = Field(default_factory=list)
+    sources_used: list = Field(default_factory=list)
     references: list[dict] = Field(default_factory=list)
     quality_score: dict = Field(default_factory=lambda: {
         "overall": 0, "coverage": 0, "freshness": 0,
@@ -132,14 +133,14 @@ class QualityReport(BaseModel):
 
 
 class ResearchInput(BaseModel):
-    research_plan: Optional[ResearchPlan] = None
-    our_company: str
-    competitor_company: str
-    product: str
+    research_plan: Optional[dict] = None
+    our_company: str = ""
+    competitor_company: str = ""
+    product: str = 
 
 
 class ResearchOutput(BaseModel):
-    evidence_bundle: EvidenceBundleDTO
+    evidence_bundle: dict
     quality_report: QualityReport
 
 
@@ -152,12 +153,14 @@ class FeatureItem(BaseModel):
     competitor_coverage: str = "unknown"
     differentiator: bool = False
     evidence_refs: list[str] = Field(default_factory=list)
+    cluster_refs: list[str] = Field(default_factory=list)
 
 
 class GapItem(BaseModel):
     dimension: str
     description: str
     evidence_refs: list[str] = Field(default_factory=list)
+    cluster_refs: list[str] = Field(default_factory=list)
     impact: str = "medium"
 
 
@@ -172,16 +175,49 @@ class GapAnalysis(BaseModel):
     evidence_references: list[str] = Field(default_factory=list)
 
 
-class CompareInput(BaseModel):
-    evidence_bundle: EvidenceBundleDTO
-    analysis_scope: list[str]
+
+
+# ── Insight Agent I/O ──
+
+class ProductInsight(BaseModel):
+    title: str
+    type: str  # fact | observation | hypothesis
+    description: str
+    evidence_refs: list[str] = Field(default_factory=list)
+    cluster_refs: list[str] = Field(default_factory=list)
+    confidence: str = "medium"  # high | medium | low
+    impact: str = "medium"  # high | medium | low
+    dimension: str = ""
+
+
+class InsightInput(BaseModel):
+    evidence_clusters: Optional[list[dict]] = None
+    gap_analysis: Optional[dict] = None
     our_company: str
     competitor_company: str
     product: str
+    objective: str = ""
+
+
+class InsightOutput(BaseModel):
+    insights: list[ProductInsight] = Field(default_factory=list)
+    fact_count: int = 0
+    observation_count: int = 0
+    hypothesis_count: int = 0
+    summary: str = ""
+
+class CompareInput(BaseModel):
+    evidence_bundle: Optional[dict] = Field(default_factory=dict)
+    evidence_clusters: Optional[list[dict]] = None
+    analysis_scope: list[str] = Field(default_factory=list)
+    objective: str = ""
+    our_company: str = ""
+    competitor_company: str = ""
+    product: str = 
 
 
 class CompareOutput(BaseModel):
-    gap_analysis: GapAnalysis
+    gap_analysis: dict
     dimensions_analyzed: list[str] = Field(default_factory=list)
     dimensions_skipped: list[str] = Field(default_factory=list)
     evidence_references_count: int = 0
@@ -192,6 +228,7 @@ class CompareOutput(BaseModel):
 class SWOTItem(BaseModel):
     item: str
     evidence_refs: list[str] = Field(default_factory=list)
+    cluster_refs: list[str] = Field(default_factory=list)
     confidence: str = "medium"
 
 
@@ -207,7 +244,7 @@ class OpportunityItem(BaseModel):
     description: str
     impact: str = "medium"
     effort: str = "medium"
-    alignment_with_objective: int = Field(default=3, ge=1, le=5)
+    alignment_with_objective: str = Field(default="medium")
     evidence_refs: list[str] = Field(default_factory=list)
     confidence: str = "medium"
 
@@ -228,6 +265,7 @@ class RecommendationItem(BaseModel):
     priority: str = "p2"
     timeline: str = "short_term"
     evidence_refs: list[str] = Field(default_factory=list)
+    cluster_refs: list[str] = Field(default_factory=list)
     kpi: Optional[str] = None
 
 
@@ -248,14 +286,15 @@ class StrategicInsights(BaseModel):
 
 
 class StrategyInput(BaseModel):
-    gap_analysis: GapAnalysis
-    evidence_bundle: EvidenceBundleDTO
-    objective: str
-    product: str
+    gap_analysis: dict = Field(default_factory=dict)
+    evidence_bundle: dict = Field(default_factory=dict)
+    insights: Optional[list[dict]] = None
+    objective: str = ""
+    product: str = 
 
 
 class StrategyOutput(BaseModel):
-    strategic_insights: StrategicInsights
+    strategic_insights: dict
     confidence_summary: dict = Field(default_factory=lambda: {
         "overall": "medium", "weaknesses": [], "data_gaps": [],
     })
@@ -290,19 +329,19 @@ class ReportDocument(BaseModel):
 
 
 class ReportInput(BaseModel):
-    evidence_bundle: EvidenceBundleDTO
-    gap_analysis: GapAnalysis
-    strategic_insights: StrategicInsights
+    evidence_bundle: dict = Field(default_factory=dict)
+    gap_analysis: dict = Field(default_factory=dict)
+    strategic_insights: dict = Field(default_factory=dict)
     template_version: str = "v1"
     output_formats: list[str] = Field(default_factory=lambda: ["markdown", "docx"])
-    objective: str
-    product: str
-    our_company: str
-    competitor_company: str
+    objective: str = ""
+    product: str = ""
+    our_company: str = ""
+    competitor_company: str = 
 
 
 class ReportOutput(BaseModel):
-    report_document: ReportDocument
+    report_document: dict
 
 
 # ── Review Agent I/O ──
@@ -333,9 +372,9 @@ class ReviewResult(BaseModel):
 
 
 class ReviewInput(BaseModel):
-    report_document: ReportDocument
-    evidence_bundle: EvidenceBundleDTO
-    objective: str
+    report_document: dict = Field(default_factory=dict)
+    evidence_bundle: dict = Field(default_factory=dict)
+    objective: str = ""
     template_version: str = "v1"
 
 

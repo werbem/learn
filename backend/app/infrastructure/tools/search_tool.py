@@ -10,6 +10,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
+from app.infrastructure.trace import trace_collector, TraceStatus
 
 import httpx
 import lxml.html

@@ -8,7 +8,6 @@ import { ProgressTracker } from "@/components/progress-tracker";
 import { createReport, getProgress, subscribeProgress } from "@/lib/api";
 import { saveToHistory } from "@/lib/utils";
 import type { AnalysisInput, PhaseRecord, StreamEvent } from "@/types";
-import { PHASE_LABELS, PHASE_ORDER } from "@/types";
 
 const POLL_INTERVAL = 800;
 const MAX_WAIT_SECONDS = 600;
@@ -18,11 +17,25 @@ type PageState =
   | { type: "creating"; taskId: string; payload: AnalysisInput }
   | { type: "polling"; taskId: string; serverTaskId: string }
   | { type: "completed"; taskId: string }
-  | { type: "error"; message: string }
+  | { type: "error"; message: string; diagnosis?: any }
   | { type: "timeout" };
 
+// ── Phase step order (for progress tracker) ──
+const PHASE_STEP_ORDER = ["validated", "planned", "researched", "compared", "strategized", "reported", "reviewed"] as const;
+type StepKey = (typeof PHASE_STEP_ORDER)[number];
 
-const AGENT_TO_PHASE: Record<string, string> = {
+const PHASE_STEP_PROGRESS: Record<StepKey, number> = {
+  validated: 5,
+  planned: 15,
+  researched: 40,
+  compared: 55,
+  strategized: 65,
+  reported: 85,
+  reviewed: 95,
+};
+
+// Agent name → completed step key (when status === "completed")
+const AGENT_TO_COMPLETED: Record<string, StepKey> = {
   gate: "validated",
   planner: "planned",
   research: "researched",
@@ -32,6 +45,10 @@ const AGENT_TO_PHASE: Record<string, string> = {
   review: "reviewed",
 };
 
+// ── Session storage keys for refresh resilience ──
+const SS_START_TIME = (tid: string) => `analysis_start_${tid}`;
+const SS_COMPLETED_STEPS = (tid: string) => `analysis_steps_${tid}`;
+
 export default function AnalysisProgressPage({
   params,
 }: {
@@ -39,16 +56,90 @@ export default function AnalysisProgressPage({
 }) {
   const router = useRouter();
   const [state, setState] = useState<PageState>({ type: "loading", taskId: "" });
-  const [phase, setPhase] = useState("");
+  const [activeStep, setActiveStep] = useState<StepKey | "">("");
+  const [completedSteps, setCompletedSteps] = useState<StepKey[]>([]);
   const [progress, setProgress] = useState(0);
   const [phaseHistory, setPhaseHistory] = useState<PhaseRecord[]>([]);
   const [eta, setEta] = useState<string>("");
-  const startTime = useRef(Date.now());
+  const [diagnosis, setDiagnosis] = useState<any>(null);
+
+  // Smoothed ETA tracking
+  const etaDeltas = useRef<number[]>([]);
+  const payloadRef = useRef<AnalysisInput | null>(null);
+  const lastEtaPhase = useRef<number>(0);
+  const lastEtaTime = useRef<number>(0);
+
+  // ── ETA calculation with moving average ──
+  const updateETA = useCallback((status: string, sid: string) => {
+    if (status === "completed") return;
+    const now = Date.now();
+    const startMs = parseInt(sessionStorage.getItem(SS_START_TIME(sid)) || String(now));
+
+    setCompletedSteps((steps) => {
+      const count = Math.max(steps.length, 1);
+      if (count < 2) {
+        setEta("待确认...");
+        return steps;
+      }
+      const elapsed = Math.max(1, (now - startMs) / 1000);
+      const totalSteps = PHASE_STEP_ORDER.length;
+
+      // Track delta for moving average between phase completions
+      if (count !== lastEtaPhase.current && lastEtaPhase.current > 0) {
+        const deltaPerPhase = (now - lastEtaTime.current) / 1000 / (count - lastEtaPhase.current);
+        etaDeltas.current.push(Math.max(1, deltaPerPhase));
+        if (etaDeltas.current.length > 4) etaDeltas.current.shift();
+      }
+      lastEtaPhase.current = count;
+      lastEtaTime.current = now;
+
+      // Use moving average if we have enough data, otherwise simple average
+      let avgPerPhase: number;
+      if (etaDeltas.current.length >= 2) {
+        avgPerPhase = etaDeltas.current.reduce((a, b) => a + b, 0) / etaDeltas.current.length;
+      } else {
+        avgPerPhase = elapsed / count;
+      }
+
+      const phasesLeft = totalSteps - count;
+      const remaining = Math.round(avgPerPhase * phasesLeft);
+
+      if (remaining <= 0) {
+        setEta("即将完成");
+      } else if (remaining < 60) {
+        setEta(`大约还需 ${remaining} 秒`);
+      } else {
+        const mins = Math.floor(remaining / 60);
+        const secs = remaining % 60;
+        setEta(`大约还需 ${mins} 分 ${secs} 秒`);
+      }
+      return steps;
+    });
+  }, []);
 
   // Resolve taskId from params and check for pending task
   useEffect(() => {
     params.then((p) => {
       const taskId = p.taskId;
+      // Restore state from sessionStorage (for page refresh)
+      const savedSteps = sessionStorage.getItem(SS_COMPLETED_STEPS(taskId));
+      if (savedSteps) {
+        try {
+          const parsed: StepKey[] = JSON.parse(savedSteps);
+          setCompletedSteps(parsed);
+          // Calculate progress from completed steps
+          if (parsed.length > 0) {
+            const last = parsed[parsed.length - 1];
+            setProgress(PHASE_STEP_PROGRESS[last] || 0);
+            // Set active step to the next one
+            const idx = PHASE_STEP_ORDER.indexOf(last);
+            if (idx >= 0 && idx + 1 < PHASE_STEP_ORDER.length) {
+              setActiveStep(PHASE_STEP_ORDER[idx + 1]);
+            }
+          }
+        } catch {}
+      }
+
       // Check sessionStorage for a pending task created by the form
       const raw = sessionStorage.getItem("pending_analysis");
       if (raw) {
@@ -68,6 +159,13 @@ export default function AnalysisProgressPage({
   }, [params, router]);
 
   // Handle the "creating" phase — POST to backend, then start polling
+  // Save payload when entering "creating" state
+  useEffect(() => {
+    if (state.type === "creating" && state.payload) {
+      payloadRef.current = state.payload;
+    }
+  }, [state]);
+
   useEffect(() => {
     if (state.type !== "creating") return;
 
@@ -81,21 +179,18 @@ export default function AnalysisProgressPage({
         } catch (err: any) {
           if (err.name === "AbortError") {
             setState({ type: "polling", taskId: state.taskId, serverTaskId: state.taskId });
+            return;
           }
           throw err;
         } finally {
           clearTimeout(timeoutId);
         }
-        saveToHistory({
-          taskId: result.task_id,
-          ourCompany: state.payload.our_company,
-          competitorCompany: state.payload.competitor_company,
-          product: state.payload.product,
-          objective: state.payload.objective,
-        });
+        // Init session storage for the server task
+        sessionStorage.setItem(SS_START_TIME(result.task_id), String(Date.now()));
+        sessionStorage.setItem(SS_COMPLETED_STEPS(result.task_id), JSON.stringify([]));
         // Clear pending data
         sessionStorage.removeItem("pending_analysis");
-        // Task is complete (backend runs sync) — start polling with server task_id
+        // Start polling with server task_id
         setState({ type: "polling", taskId: state.taskId, serverTaskId: result.task_id });
       } catch (err) {
         const msg = err instanceof Error ? err.message : "创建分析任务失败";
@@ -105,6 +200,13 @@ export default function AnalysisProgressPage({
     doCreate();
   }, [state, router]);
 
+  // Initialize start time once serverTaskId is known
+  useEffect(() => {
+    if (state.type === "polling" && !sessionStorage.getItem(SS_START_TIME(state.serverTaskId))) {
+      sessionStorage.setItem(SS_START_TIME(state.serverTaskId), String(Date.now()));
+    }
+  }, [state]);
+
   // ── SSE Streaming (parallel to polling) ──
   useEffect(() => {
     if (state.type !== "polling") return;
@@ -113,127 +215,150 @@ export default function AnalysisProgressPage({
       state.serverTaskId,
       (event: StreamEvent) => {
         if (event.event_type === "phase_update") {
+          const agentKey = event.agent || "";
           if (event.status === "running") {
-            setPhase(AGENT_TO_PHASE[event.agent || ""] || event.agent || "");
-          }
-          if (event.progress !== undefined) {
-            setProgress(event.progress);
-          }
-          // Phase-based ETA (more stable than progress-based)
-          const phaseOrder = ["validated","planned","researched","compared","strategized","reported","reviewed","completed"];
-          const phaseName = AGENT_TO_PHASE[event.agent || ""] || event.agent || "";
-          const currentIdx = phaseOrder.indexOf(phaseName);
-          if (currentIdx >= 0) {
-            const elapsed = Math.max(1, (Date.now() - startTime.current) / 1000);
-            // Show "计算中..." until we have at least 2 completed phases
-            if (currentIdx < 1) {
-              setEta("计算中...");
-            } else {
-              const avgPerPhase = elapsed / currentIdx;
-              const phasesLeft = phaseOrder.length - currentIdx - 1;
-              const remaining = avgPerPhase * phasesLeft;
-              const mins = Math.floor(remaining / 60);
-              const secs = Math.floor(remaining % 60);
-              setEta(mins > 0 ? `大约还需 ${mins} 分 ${secs} 秒` : `大约还需 ${secs} 秒`);
+            // Agent started — set as active step
+            setActiveStep(AGENT_TO_COMPLETED[agentKey] || "");
+          } else if (event.status === "completed") {
+            // Agent completed — add to completed steps
+            const completedKey = AGENT_TO_COMPLETED[agentKey];
+            if (completedKey) {
+              setCompletedSteps((prev) => {
+                if (!prev.includes(completedKey)) {
+                  const next = [...prev, completedKey];
+                  sessionStorage.setItem(SS_COMPLETED_STEPS(state.serverTaskId), JSON.stringify(next));
+                  return next;
+                }
+                return prev;
+              });
+              // Move active to next step
+              const idx = PHASE_STEP_ORDER.indexOf(completedKey);
+              if (idx >= 0 && idx + 1 < PHASE_STEP_ORDER.length) {
+                setActiveStep(PHASE_STEP_ORDER[idx + 1]);
+              } else {
+                setActiveStep("");
+              }
+              // Use phase-based progress (stable, no jumping)
+              setProgress(PHASE_STEP_PROGRESS[completedKey] || progress);
             }
           }
+          updateETA(event.status, state.serverTaskId);
         }
       },
       (status: string) => {
-        // SSE updates UI only — polling handles redirect
+        // onDone — workflow complete
         if (status === "completed") {
-          setPhase("completed");
           setProgress(100);
-        } else if (status === "failed" || status === "need_more_research" || status === "review_failed") {
-          // Don't set error here — polling handles the final decision
-          // (may still redirect if report exists)
+          setEta("");
+          // Only save to history on actual completion
+          const p = payloadRef.current;
+          saveToHistory({
+            taskId: state.serverTaskId,
+            ourCompany: p?.our_company || "",
+            competitorCompany: p?.competitor_company || "",
+            product: p?.product || "",
+            objective: p?.objective || "",
+          });
+          setTimeout(() => {
+            setState({ type: "completed", taskId: state.serverTaskId });
+            router.push(`/report/${state.serverTaskId}`);
+          }, 500);
+        } else if (status === "need_more_research") {
+          setState({ type: "error", message: "证据不足，需要补充更多信息后重新分析" });
         }
+      },
+      (err: Event) => {
+        // Silently handle SSE errors — polling is the fallback
       }
     );
 
-    // Store ref for cleanup
-    const esRef = es;
-    return () => {
-      esRef?.close();
-    };
-  }, [state, router]);
+    return () => { es.close(); };
+  }, [state, router, updateETA]);
 
-  // Poll progress (kept for fallback)
+  // ── Polling (fallback + result detection) ──
   useEffect(() => {
     if (state.type !== "polling") return;
 
+    const timeout = setTimeout(() => {
+      setState({ type: "timeout", taskId: state.serverTaskId });
+    }, MAX_WAIT_SECONDS * 1000);
+
     const interval = setInterval(async () => {
       try {
+        const now = Date.now();
+        const startMs = parseInt(sessionStorage.getItem(SS_START_TIME(state.serverTaskId)) || String(now));
         const data = await getProgress(state.serverTaskId);
-        const elapsed = (Date.now() - startTime.current) / 1000;
-        if (elapsed > MAX_WAIT_SECONDS) {
-          setState({ type: "timeout" });
-          clearInterval(interval);
-          return;
-        }
 
-        setPhase(data.current_agent || data.status);
-        setProgress(data.progress);
-        setPhaseHistory(data.phase_history || []);
-
-        if (data.status === "completed") {
+        // Detect completion states
+        const status = data.status;
+        if (status === "completed" || status === "reviewed") {
           clearInterval(interval);
-          const pendingRaw = sessionStorage.getItem("pending_analysis");
-          let historyData = { ourCompany: "", competitorCompany: "", product: "", objective: "" };
-          if (pendingRaw) {
-            try {
-              const pending = JSON.parse(pendingRaw);
-              historyData = pending.payload || historyData;
-            } catch {}
-          }
-          saveToHistory({
-            taskId: state.serverTaskId,
-            ...historyData,
-          });
-          await new Promise((r) => setTimeout(r, 500));
-          setState({ type: "completed", taskId: state.serverTaskId });
-          router.push(`/report/${state.serverTaskId}`);
-        } else if (data.status === "failed" || data.status === "review_failed") {
-          clearInterval(interval);
-          // Try to load the report — it may have been generated despite review failure
+          clearTimeout(timeout);
+          // Try to fetch report first
           try {
-            const { getReport } = await import("@/lib/api");
-            const report = await getReport(state.serverTaskId);
-            if (report && report.sections?.length > 0) {
-              // Report exists! Save history and redirect
-              const pendingRaw = sessionStorage.getItem("pending_analysis");
-              let historyData = { ourCompany: "", competitorCompany: "", product: "", objective: "" };
-              if (pendingRaw) {
-                try {
-                  const pending = JSON.parse(pendingRaw);
-                  historyData = pending.payload || historyData;
-                } catch {}
-              }
-              saveToHistory({ taskId: state.serverTaskId, ...historyData });
+            const res = await fetch(`${process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8000"}/api/reports/${state.serverTaskId}`);
+            if (res.ok) {
               setState({ type: "completed", taskId: state.serverTaskId });
               router.push(`/report/${state.serverTaskId}`);
               return;
             }
-          } catch {
-            // Report not found — continue to error
-          }
+          } catch {}
+          setState({ type: "error", message: data.error_info || "报告生成失败" });
+        } else if (status === "failed" || status === "review_failed" || status === "validation_failed") {
+          clearInterval(interval);
+          clearTimeout(timeout);
+          // Try to fetch diagnosis
+          try {
+            const diagRes = await fetch(`${process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8000"}/api/traces/${state.serverTaskId}/diagnosis`);
+            if (diagRes.ok) {
+              const diag = await diagRes.json();
+              setState({ type: "error", message: data.error_info || "分析任务失败", diagnosis: diag });
+              return;
+            }
+          } catch {}
           setState({ type: "error", message: data.error_info || "分析任务失败" });
         } else if (data.status === "need_more_research") {
           clearInterval(interval);
+          clearTimeout(timeout);
           setState({ type: "error", message: "证据不足，需要补充更多信息后重新分析" });
+        } else if (data.status !== "pending" && data.status !== "unknown") {
+          // Echo progress from backend
+          updateETA(data.status, state.serverTaskId);
         }
-      } catch {
+      } catch (err: any) {
         // Task may not be ready yet — keep polling
+        const elapsed = (Date.now() - startTime()) / 1000;
+        if (elapsed > 10 && (err?.message?.includes("404") || err?.message?.includes("fetch"))) {
+          clearInterval(interval);
+          clearTimeout(timeout);
+          setState({ type: "error", message: "分析任务已丢失（后台服务可能已重启），请返回首页重新创建" });
+        }
       }
     }, POLL_INTERVAL);
 
-    return () => clearInterval(interval);
-  }, [state, router]);
+    return () => {
+      clearInterval(interval);
+      clearTimeout(timeout);
+    };
+  }, [state, router, updateETA]);
 
   const handleCancel = useCallback(() => {
-    sessionStorage.removeItem("pending_analysis");
+    if (state.type === "polling") {
+      // Clean up session storage for cancelled tasks
+      sessionStorage.removeItem("pending_analysis");
+      sessionStorage.removeItem(SS_START_TIME(state.serverTaskId));
+      sessionStorage.removeItem(SS_COMPLETED_STEPS(state.serverTaskId));
+    }
     router.push("/");
-  }, [router]);
+  }, [router, state]);
+
+  // ── Helper for start time ──
+  const startTime = (): number => {
+    if (state.type === "polling") {
+      return parseInt(sessionStorage.getItem(SS_START_TIME(state.serverTaskId)) || String(Date.now()));
+    }
+    return Date.now();
+  };
 
   // ── Render ──
 
@@ -306,11 +431,32 @@ export default function AnalysisProgressPage({
 
   if (state.type === "error") {
     return (
-      <div className="max-w-lg mx-auto text-center space-y-4 py-12">
-        <div className="text-4xl">❌</div>
-        <h2 className="text-xl font-semibold">分析失败</h2>
-        <p className="text-muted-foreground">{state.message}</p>
-        <Button variant="outline" onClick={handleCancel}>返回首页</Button>
+      <div className="max-w-lg mx-auto space-y-4 py-12">
+        <div className="text-center space-y-4">
+          <div className="text-4xl">❌</div>
+          <h2 className="text-xl font-semibold">分析失败</h2>
+          <p className="text-muted-foreground">{state.message}</p>
+        </div>
+        {state.diagnosis && (
+          <Card className="p-4 space-y-2 bg-destructive/5 border-destructive/20">
+            <h3 className="font-medium text-sm">故障诊断</h3>
+            <div className="grid grid-cols-2 gap-x-3 gap-y-1.5 text-sm">
+              <div className="text-muted-foreground">失败环节</div>
+              <div>{state.diagnosis.failed_stage || state.diagnosis.failed_agent || "—"}</div>
+              <div className="text-muted-foreground">错误类型</div>
+              <div className="font-mono text-xs">{state.diagnosis.error_type || "—"}</div>
+              <div className="text-muted-foreground">根因分析</div>
+              <div className="text-xs">{state.diagnosis.root_cause || "—"}</div>
+              <div className="text-muted-foreground">建议</div>
+              <div className="text-xs">{state.diagnosis.suggestion || "—"}</div>
+              <div className="text-muted-foreground">可重试</div>
+              <div>{state.diagnosis.retry_available ? "✅ 可以" : "❌ 不可"}</div>
+            </div>
+          </Card>
+        )}
+        <div className="text-center">
+          <Button variant="outline" onClick={handleCancel}>返回首页</Button>
+        </div>
       </div>
     );
   }
@@ -319,19 +465,28 @@ export default function AnalysisProgressPage({
   return (
     <div className="max-w-2xl mx-auto space-y-8 py-4">
       <div className="text-center space-y-2">
-        <h1 className="text-2xl font-bold">正在分析中</h1>
+        <h1 className="text-2xl font-bold">
+          {completedSteps.length === 0 ? "正在启动分析引擎" : "正在分析中"}
+        </h1>
         <p className="text-muted-foreground text-sm">
-          AI 正在收集情报并进行深度分析，请稍候...
+          {completedSteps.length === 0
+            ? "AI 正在准备分析引擎，即将开始情报收集..."
+            : "AI 正在收集情报并进行深度分析，请稍候..."}
         </p>
-        {eta && (
-          <p className="text-sm font-medium text-primary animate-pulse">
+        {eta ? (
+          <p className={`text-sm font-medium ${eta === "待确认..." ? "text-muted-foreground" : "text-primary animate-pulse"}`}>
             ⏱️ {eta}
+          </p>
+        ) : (
+          <p className="text-sm font-medium text-muted-foreground animate-pulse">
+            ⏱️ 待确认...
           </p>
         )}
       </div>
       <Card className="p-6">
         <ProgressTracker
-          currentPhase={phase}
+          activeStep={activeStep}
+          completedSteps={completedSteps}
           phaseHistory={phaseHistory}
           progress={progress}
         />

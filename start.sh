@@ -87,7 +87,7 @@ echo -e "  Backend:  ${GREEN}http://localhost:8000${NC} (PID: $BACKEND_PID)"
 
 # Start frontend
 cd "$ROOT_DIR/frontend"
-pnpm start &
+pnpm dev &
 FRONTEND_PID=$!
 echo -e "  Frontend: ${GREEN}http://localhost:3000${NC} (PID: $FRONTEND_PID)"
 

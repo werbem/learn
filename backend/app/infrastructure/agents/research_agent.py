@@ -1,20 +1,18 @@
-"""Research Agent — evidence collection via Tavily Search + LLM extraction.
+"""Research Agent — multi-source evidence collection + LLM extraction.
 
 Flow:
-  1. Generate focused search queries via LLM
-  2. Execute searches via Tavily API
+  1. Read research_tasks from Planner's ResearchPlan
+  2. Route tasks via SourceRouter → multiple ResearchSources (parallel)
   3. LLM extracts structured evidence from search results
   4. Build EvidenceBundle + QualityReport
 
 Rules:
   - No fabricated sources: every evidence must have a real URL
   - No evidence → return empty list (never invent)
-  - First stage: Tavily web search only (no AppStore/GooglePlay/Social)
+  - Source coverage expands as new ResearchSources are registered
 """
 
 from __future__ import annotations
-
-from pydantic import BaseModel, Field
 
 import asyncio
 import json
@@ -39,36 +37,18 @@ from app.infrastructure.agents.research_prompt import (
     build_extraction_prompt,
 )
 from app.infrastructure.llm.client import llm_client
-from app.infrastructure.tools.tavily_tool import TavilyResult, tavily_search
-
-# ── Query Generation ──
-
-_SEARCH_QUERY_SYSTEM = """你是一个搜索策略专家。根据竞品分析目标，生成 3-5 个精准的中文搜索查询。
-
-要求：
-1. 每个查询必须具体、可搜索
-2. 覆盖不同角度（用户、功能、市场、竞品对比等）
-3. 优先使用具体产品名、公司名
-4. 返回纯 JSON 数组
-
-示例输出格式：
-["飞猪 DAU 下降 原因 分析", "飞猪 vs 携程 用户对比 2025", "在线旅游平台 用户流失 原因"]"""
-
-_SEARCH_QUERY_MODEL = type("SearchQueries", (), {
-    "__annotations__": {"queries": list[str]},
-    "__module__": "research_agent",
-})
-
-# Inject Pydantic validation
-import pydantic
-QueriesList = pydantic.create_model(
-    "SearchQueries",
-    queries=(list[str], pydantic.Field(description="搜索查询列表，3-5个")),
-)
+from app.infrastructure.tools.research_source import SourceResult
+from app.infrastructure.tools.source_router import source_router
+from app.infrastructure.tools.source_selection import source_selection
+from app.infrastructure.tools.llm_router import llm_router
 
 
 class ResearchAgent(BaseAgent[ResearchInput, ResearchOutput]):
-    """Research Agent — Tavily search + LLM evidence extraction."""
+    """Research Agent — multi-source evidence collection.
+
+    Routes Planner's ResearchTasks to registered ResearchSources,
+    collects evidence in parallel, and extracts structured data via LLM.
+    """
 
     @property
     def agent_name(self) -> str:
@@ -81,8 +61,8 @@ class ResearchAgent(BaseAgent[ResearchInput, ResearchOutput]):
     async def arun(self, ctx: AgentContext, input_data: ResearchInput) -> AgentResult:
         """Execute evidence collection.
 
-        1. Generate search queries
-        2. Execute Tavily searches
+        1. Extract research_tasks from Planner's ResearchPlan
+        2. Route tasks via SourceRouter → parallel source execution
         3. LLM extract evidence
         4. Build output
         """
@@ -90,15 +70,43 @@ class ResearchAgent(BaseAgent[ResearchInput, ResearchOutput]):
             f"分析 {input_data.competitor_company} 的 {input_data.product}"
         )
 
-        # Step 1: Generate search queries
-        queries = await self._generate_queries(objective, input_data)
+        # Step 1: Build Source Selection Plan (LLM-driven with rule-based fallback)
+        if input_data.research_plan and input_data.research_plan.analysis_scope:
+            sel_plan = await llm_router.route(
+                dimensions=input_data.research_plan.analysis_scope,
+                keywords=source_router._collect_keywords(input_data.research_plan),
+                objective=objective,
+                task_id=ctx.task_id,
+            )
+        else:
+            sel_plan = None
 
-        # Step 2: Execute searches
-        all_results = await self._execute_searches(queries, input_data)
+        # Step 2: Execute searches via the execution plan
+        context = {
+            "task_id": ctx.task_id,
+            "objective": objective,
+            "our_company": input_data.our_company,
+            "competitor_company": input_data.competitor_company,
+            "product": input_data.product,
+        }
+        if sel_plan:
+            # Build SourceExecutionPlan compatible with execute_plan
+            from app.infrastructure.tools.dimension_router import SourceExecutionPlan
+            exec_plan = SourceExecutionPlan(
+                dimensions=sel_plan.dimensions,
+                source_types=sel_plan.all_source_types,
+                keywords=sel_plan.tasks[0].keywords if sel_plan.tasks else [],
+                objective=sel_plan.objective,
+                dimension_mapping={t.dimension: t.sources for t in sel_plan.tasks},
+            )
+            all_results = await source_router.execute_plan(exec_plan, context=context)
+        else:
+            # Fallback: no research plan, use legacy task-based routing
+            all_results = await source_router.search_many([], context=context)
 
-        # Step 3: Extract evidence via LLM
-        evidence_items, search_summary = await self._extract_evidence(
-            queries, objective, all_results,
+        # Step 3: Extract evidence via LLM (uses raw items from SourceResults)
+        evidence_items, search_summary = await self._extract_evidence_from_sources(
+            objective, all_results,
         )
 
         # Step 4: Build output
@@ -117,141 +125,89 @@ class ResearchAgent(BaseAgent[ResearchInput, ResearchOutput]):
                 "phase": Phase.RESEARCHING.value,
                 "duration_ms": 0,
                 "status": "completed",
-                "queries_used": queries,
-                "tavily_calls": len(queries),
+                "selection_plan": sel_plan.dimensions if sel_plan else [],
+                "selection_tasks": [t.dimension + ":" + ",".join(t.sources) for t in sel_plan.tasks] if sel_plan else [],
+                "source_types_selected": exec_plan.source_types if exec_plan else [],
+                "tasks_executed": len(exec_plan.source_types) if exec_plan else 0,
+                "sources_called": len(all_results),
+                "sources_succeeded": sum(1 for r in all_results if r.status == "success"),
                 "total_results": sum(len(r.items) for r in all_results),
                 "evidence_count": len(evidence_items),
                 "llm_generated": True,
             },
         )
 
-    # ── Step 1: Generate Search Queries ──
+    # ── Evidence Extraction from SourceResults ──
 
-    async def _generate_queries(
+    async def _extract_evidence_from_sources(
         self,
         objective: str,
-        input_data: ResearchInput,
-    ) -> list[str]:
-        """Use LLM to generate focused search queries."""
-        prompt = f"""分析目标：{objective}
-我方公司：{input_data.our_company}
-竞品公司：{input_data.competitor_company}
-分析产品：{input_data.product}
-
-请生成 3-5 个精准的搜索查询。"""
-
-        try:
-            result = await llm_client.generate(
-                system_prompt=_SEARCH_QUERY_SYSTEM,
-                user_prompt=prompt,
-                response_model=QueriesList,
-                temperature=0.5,
-            )
-            if result.parsed and result.parsed.queries:
-                return result.parsed.queries[:5]
-        except Exception:
-            pass
-
-        # Fallback: static queries based on input
-        return [
-            f"{input_data.competitor_company} {input_data.product} 分析",
-            f"{input_data.product} 用户 数据 2025",
-            f"{input_data.our_company} vs {input_data.competitor_company} 对比",
-        ]
-
-    # ── Step 2: Execute Tavily Searches ──
-
-    async def _execute_searches(
-        self,
-        queries: list[str],
-        input_data: ResearchInput,
-    ) -> list[TavilyResult]:
-        """Execute Tavily searches concurrently for all queries."""
-        tasks = [
-            tavily_search(query, max_results=8, include_raw_content=False)
-            for query in queries
-        ]
-        results: list[TavilyResult] = await asyncio.gather(*tasks)
-        return results
-
-    # ── Step 3: Extract Evidence via LLM ──
-
-    async def _extract_evidence(
-        self,
-        queries: list[str],
-        objective: str,
-        all_results: list[TavilyResult],
+        all_results: list[SourceResult],
     ) -> tuple[list[EvidenceItemDTO], str]:
-        """Use LLM to extract structured evidence from search results.
-
-        Process each query-result pair independently, then merge.
-        """
+        """LLM extracts structured evidence from multi-source search results."""
         all_evidence: list[EvidenceItemDTO] = []
-        evidence_counter = 0
         all_summaries: list[str] = []
 
-        for query, result in zip(queries, all_results):
-            if result.status != "success" or not result.items:
+        for result in all_results:
+            if result.error:
                 all_summaries.append(
-                    f"查询「{query}」：{result.status} ({result.error or '无结果'})"
+                    f"[{result.source_name}] 错误: {result.error}"
                 )
                 continue
 
-            # Build JSON for LLM
-            results_json = json.dumps(
-                [
-                    {
-                        "title": r.get("title", ""),
-                        "url": r.get("url", ""),
-                        "content": r.get("content", "")[:500],
-                        "score": r.get("score", 0),
-                    }
-                    for r in result.items
-                ],
-                ensure_ascii=False,
-            )
+            if not result.items:
+                all_summaries.append(f"[{result.source_name}] 无结果")
+                continue
+
+            # Build query label for the LLM prompt
+            source_label = f"{result.source_name} ({result.source_type})"
+
+            # Serialize items for LLM extraction
+            items_json = json.dumps([
+                {
+                    "title": item.title,
+                    "url": item.url,
+                    "content": item.content[:1500],
+                    "published_date": item.published_date,
+                    "source_type": item.source_type,
+                    "source_name": item.source_name,
+                    "metrics": item.metrics,
+                }
+                for item in result.items[:10]
+            ], ensure_ascii=False, indent=2)
 
             try:
-                llm_result = await llm_client.generate(
+                prompt = build_extraction_prompt(source_label, objective, items_json)
+                extraction_result = await llm_client.generate(
                     system_prompt=SYSTEM_PROMPT,
-                    user_prompt=build_extraction_prompt(
-                        query, objective, results_json,
-                    ),
+                    user_prompt=prompt,
                     response_model=ExtractedEvidence,
                     temperature=0.3,
                 )
 
-                if llm_result.parsed:
-                    parsed: ExtractedEvidence = llm_result.parsed
-                    for item in parsed.evidence_items:
-                        dto = EvidenceItemDTO(
-                        id=f"E{evidence_counter:03d}",
-                            title=item.title,
-                            source=item.source,
-                            url=item.url,
-                            date=item.date,
-                            content=item.summary,
-                            confidence=item.confidence,
-                            category=item.dimension,
-                            source_type="web",
-                            extracted_at=datetime.now(),
-                            raw_data={
-                                "dimension": item.dimension,
-                                "from_query": query,
-                            },
-                        )
-                        evidence_counter += 1
-                        all_evidence.append(dto)
+                if extraction_result.parsed and extraction_result.parsed.evidence_items:
+                    for e in extraction_result.parsed.evidence_items:
+                        all_evidence.append(EvidenceItemDTO(
+                            title=e.title,
+                            source=e.source,
+                            source_type=result.source_type,
+                            url=e.url,
+                            date=e.date,
+                            content=e.summary,
+                            confidence=e.confidence,
+                            category=e.dimension,
+                            extracted_at=datetime.utcnow(),
+                        ))
                     all_summaries.append(
-                        f"查询「{query}」：{parsed.search_summary}"
+                        f"[{result.source_name}] 从 {len(result.items)} 条结果中提取 {len(extraction_result.parsed.evidence_items)} 条证据"
                     )
                 else:
                     all_summaries.append(
-                        f"查询「{query}」：LLM解析失败，返回 {len(result.items)} 条原始结果"
+                        f"[{result.source_name}] LLM解析失败，返回 {len(result.items)} 条原始结果"
                     )
             except Exception as exc:
                 all_summaries.append(
-                    f"查询「{query}」：LLM调用失败 ({exc})"
+                    f"[{result.source_name}] LLM调用失败 ({exc})"
                 )
 
         # Deduplicate by URL
@@ -267,6 +223,41 @@ class ResearchAgent(BaseAgent[ResearchInput, ResearchOutput]):
 
         search_summary = " | ".join(all_summaries) if all_summaries else "无搜索执行"
 
+        # Evaluate evidence quality (NEW: Evidence Intelligence Layer)
+        if deduped:
+            try:
+                from app.infrastructure.tools.evidence_evaluator import evidence_evaluator
+                score_inputs = [
+                    {
+                        "id": e.id or "",
+                        "title": e.title,
+                        "content": e.content,
+                        "source_type": e.source_type,
+                        "url": e.url,
+                        "date": e.date,
+                    }
+                    for e in deduped
+                ]
+                quality_scores = await evidence_evaluator.evaluate_batch(
+                    items=score_inputs,
+                    objective=objective,
+                    max_concurrent=10,
+                )
+                for i, score in enumerate(quality_scores):
+                    deduped[i].quality_score = score.to_dict()
+                    # Also update confidence string based on overall score
+                    overall = score.overall_confidence
+                    if overall >= 0.80:
+                        deduped[i].confidence = "high"
+                    elif overall >= 0.50:
+                        deduped[i].confidence = "medium"
+                    elif overall >= 0.30:
+                        deduped[i].confidence = "low"
+                    else:
+                        deduped[i].confidence = "estimated"
+            except Exception:
+                pass  # Evaluator failure is non-blocking
+
         return deduped, search_summary
 
     # ── Step 4: Build Output ──
@@ -275,7 +266,7 @@ class ResearchAgent(BaseAgent[ResearchInput, ResearchOutput]):
         self,
         input_data: ResearchInput,
         evidence_items: list[EvidenceItemDTO],
-        all_results: list[TavilyResult],
+        all_results: list[SourceResult],
     ) -> tuple[EvidenceBundleDTO, QualityReport]:
         """Build EvidenceBundle and QualityReport from extracted evidence."""
         total_results = sum(len(r.items) for r in all_results)
@@ -331,7 +322,7 @@ class ResearchAgent(BaseAgent[ResearchInput, ResearchOutput]):
             quality_score={
                 "overall": min(100, len(evidence_items) * 10),
                 "coverage": min(100, len(sources_used) * 10),
-                "freshness": 70,  # Tavily tends to return recent results
+                "freshness": 70,
             },
         )
 
@@ -351,6 +342,9 @@ class ResearchAgent(BaseAgent[ResearchInput, ResearchOutput]):
             / max(len(evidence_items), 1)
         )
 
+        # Count no_api_key sources for warning message
+        no_key_count = sum(1 for r in all_results if r.status == "no_api_key")
+
         quality = QualityReport(
             sources_attempted=max(len(all_results), 1),
             sources_succeeded=sum(1 for r in all_results if r.status == "success"),
@@ -359,8 +353,8 @@ class ResearchAgent(BaseAgent[ResearchInput, ResearchOutput]):
             avg_confidence=round(avg_conf, 2),
             fallback_used=False,
             missing_data_warnings=(
-                ["TAVILY_API_KEY 未配置，无法执行真实搜索"]
-                if not evidence_items and not total_results
+                ["未配置任何搜索源 API Key (TAVILY_API_KEY)，无法执行真实搜索"]
+                if not evidence_items and no_key_count > 0
                 else []
             ),
         )

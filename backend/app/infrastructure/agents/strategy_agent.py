@@ -64,6 +64,10 @@ class StrategyAgent(BaseAgent[StrategyInput, StrategyOutput]):
             for e in sorted(evidence_items, key=lambda x: {"high":0,"medium":1,"low":2}.get(x.confidence,3))[:15]
         ], ensure_ascii=False, indent=2)
 
+        # ── Step 3.5: Build insights JSON ──
+        insights_list = input_data.insights or []
+        insights_json = json.dumps(insights_list, ensure_ascii=False, indent=2)
+
         # ── Step 4: Call LLM ──
         try:
             result = await llm_client.generate(
@@ -73,6 +77,7 @@ class StrategyAgent(BaseAgent[StrategyInput, StrategyOutput]):
                     product=input_data.product,
                     gap_summary=gap_summary,
                     evidence_json=evidence_json,
+                    insights_json=insights_json,
                 ),
                 response_model=None,
                 temperature=0.5,
@@ -100,13 +105,13 @@ class StrategyAgent(BaseAgent[StrategyInput, StrategyOutput]):
 
         # ── Step 6: Map to existing DTOs ──
         swot = SWOT(
-            strengths=[SWOTItem(item=s.conclusion, evidence_refs=s.evidence_refs, confidence=s.confidence)
+            strengths=[SWOTItem(item=s.conclusion, evidence_refs=s.evidence_refs, cluster_refs=getattr(s, "cluster_refs", []) or [], confidence=s.confidence)
                        for s in parsed.swot.strengths],
-            weaknesses=[SWOTItem(item=w.conclusion, evidence_refs=w.evidence_refs, confidence=w.confidence)
+            weaknesses=[SWOTItem(item=w.conclusion, evidence_refs=w.evidence_refs, cluster_refs=getattr(w, "cluster_refs", []) or [], confidence=w.confidence)
                         for w in parsed.swot.weaknesses],
-            opportunities=[SWOTItem(item=o.conclusion, evidence_refs=o.evidence_refs, confidence=o.confidence)
+            opportunities=[SWOTItem(item=o.conclusion, evidence_refs=o.evidence_refs, cluster_refs=getattr(o, "cluster_refs", []) or [], confidence=o.confidence)
                           for o in parsed.swot.opportunities],
-            threats=[SWOTItem(item=t.conclusion, evidence_refs=t.evidence_refs, confidence=t.confidence)
+            threats=[SWOTItem(item=t.conclusion, evidence_refs=t.evidence_refs, cluster_refs=getattr(t, "cluster_refs", []) or [], confidence=t.confidence)
                     for t in parsed.swot.threats],
         )
 

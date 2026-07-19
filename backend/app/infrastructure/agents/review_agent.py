@@ -88,7 +88,7 @@ class ReviewAgent(BaseAgent[ReviewInput, ReviewOutput]):
 
         # ── Map to DTOs ──
         score = max(0, min(100, int(data.get("score", 75))))
-        status = data.get("status", "PASS")
+        status = data.get("status") or "PASS"
         checks_raw = data.get("checks", {})
         issues_raw = data.get("issues", [])
         suggestions = data.get("suggestions", [])
@@ -146,7 +146,7 @@ class ReviewAgent(BaseAgent[ReviewInput, ReviewOutput]):
             low_count = sum(1 for i in issues if i.severity == "minor")
 
         # Determine final status
-        passed_for_output = status == "PASS" and high_count == 0
+        passed_for_output = (status == "PASS") and (high_count == 0)
 
         # Create revision suggestions from suggestions + issues
         revision_suggestions: list[dict] = []

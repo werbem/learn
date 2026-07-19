@@ -9,6 +9,7 @@ from langgraph.graph import END, StateGraph
 
 from app.infrastructure.workflow.nodes import (
     compare_node,
+    insight_node,
     fail_node,
     finalize_node,
     need_research_node,
@@ -29,24 +30,22 @@ def _route_from_validate(state: WorkflowState) -> str:
 
 
 def _route_from_strategy(state: WorkflowState) -> str:
-    """After strategy: sufficient → report, need more research → need_research."""
-    cp = state.get("current_phase", "")
-    if cp == "need_more_research":
-        return "need_research_node"
+    """After strategy: always go to report (even with limited evidence).
+
+    Previously, insufficient evidence routed to need_research_node (dead end).
+    Now we always generate a report — lower quality is better than no report.
+    The report agent will note when evidence is limited.
+    """
     return "report_node"
 
 
 def _route_from_review(state: WorkflowState) -> str:
-    """After review: passed → finalize, failed → check retry budget."""
-    cp = state.get("current_phase", "")
-    if cp == "reviewed":
-        return "finalize_node"
-    # review_failed — check retry count
-    retries = state.get("retry_counts", {})
-    report_retries = retries.get("report_retry", 0)
-    if report_retries < 3:
-        return "report_node"
-    return "fail_node"
+    """After review: always finalize (review is advisory, not a gate).
+
+    Review issues are recorded in the state for display in the final report.
+    The report is always delivered regardless of review score.
+    """
+    return "finalize_node"
 
 
 def build_workflow_graph() -> StateGraph:
@@ -59,6 +58,7 @@ def build_workflow_graph() -> StateGraph:
     graph.add_node("plan_node", plan_node)
     graph.add_node("research_node", research_node)
     graph.add_node("compare_node", compare_node)
+    graph.add_node("insight_node", insight_node)
     graph.add_node("strategy_node", strategy_node)
     graph.add_node("need_research_node", need_research_node)
     graph.add_node("report_node", report_node)
@@ -79,20 +79,14 @@ def build_workflow_graph() -> StateGraph:
     # ── Main pipeline (sequential) ──
     graph.add_edge("plan_node", "research_node")
     graph.add_edge("research_node", "compare_node")
-    graph.add_edge("compare_node", "strategy_node")
+    graph.add_edge("compare_node", "insight_node")
+    graph.add_edge("insight_node", "strategy_node")
 
-    # ── Conditional: strategy → report | need_research ──
-    graph.add_conditional_edges(
-        "strategy_node",
-        _route_from_strategy,
-        {
-            "report_node": "report_node",
-            "need_research_node": "need_research_node",
-        },
-    )
+    # ── Strategy → always report (evidence limitation noted in report) ──
+    graph.add_edge("strategy_node", "report_node")
     graph.add_edge("report_node", "review_node")
 
-    # ── Conditional: review → finalize | report (retry) | fail ──
+    # ── Review → always finalize ──
     graph.add_conditional_edges(
         "review_node",
         _route_from_review,

@@ -21,6 +21,11 @@ build/
 # Data (except tracked)
 data/*.db
 data/word_outputs/*.docx
+data/
+
+# Backup files
+*.bak
+*.bak[0-9]
 
 # OS
 .DS_Store

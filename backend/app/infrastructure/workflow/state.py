@@ -87,10 +87,14 @@ class WorkflowState(TypedDict, total=False):
     phase_history: list[PhaseRecord]
     progress: float
 
+    # ── Evidence Intelligence ──
+    clusters: Optional[list[dict[str, Any]]]
+
     # ── Agent outputs (accumulated) ──
     research_plan: Optional[dict[str, Any]]
     evidence_bundle: Optional[dict[str, Any]]
     gap_analysis: Optional[dict[str, Any]]
+    insights: Optional[dict[str, Any]]
     strategic_insights: Optional[dict[str, Any]]
     report_document: Optional[dict[str, Any]]
     review_result: Optional[dict[str, Any]]
@@ -128,11 +132,13 @@ def create_initial_state(user_input: dict[str, Any]) -> WorkflowState:
         phase_history=[],
         progress=0.0,
         research_plan=None,
-        evidence_bundle=None,
-        gap_analysis=None,
-        strategic_insights=None,
-        report_document=None,
-        review_result=None,
+        evidence_bundle={},
+        gap_analysis={},
+        insights=None,
+        strategic_insights={},
+        report_document={},
+        review_result={},
+        clusters=[],
         errors=[],
         retry_counts={},
         stream_events=[],

@@ -32,6 +32,7 @@ def _register_task(task_id: str) -> None:
             "progress": 0.0,
             "phase_history": [],
             "error_info": None,
+            "diagnosis": None,
             "created_at": datetime.utcnow(),
             "started_at": None,
             "completed_at": None,
@@ -51,11 +52,23 @@ async def get_task_progress(task_id: UUID) -> TaskProgressResponse:
         raise HTTPException(status_code=404, detail="任务不存在")
 
     history = state.get("phase_history", [])
+    # Collect error info from entry, state["error_info"], or state["errors"]
+    error_info = (
+        entry.get("error")
+        or state.get("error_info")
+        or (state.get("errors", [None])[-1] if state.get("errors") else None)
+    )
+
+    # Expose diagnosis if available (from workflow exception handler)
+    diagnosis = entry.get("diagnosis") or None
+
     return TaskProgressResponse(
         task_id=task_id,
         status=state.get("current_phase", "unknown"),
         current_agent=state.get("current_phase", ""),
         progress=state.get("progress", 0.0),
+        error_info=error_info,
+        diagnosis=diagnosis,
         phase_history=[
             PhaseRecordDTO(
                 phase=h.get("phase", ""),

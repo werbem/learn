@@ -12,6 +12,7 @@ import json
 import os
 import re
 import uuid
+import traceback
 from datetime import datetime
 from typing import Any
 
@@ -68,17 +69,17 @@ class ReportAgent(BaseAgent[ReportInput, ReportOutput]):
         return Phase.REPORTING
 
     async def arun(self, ctx: AgentContext, input_data: ReportInput) -> AgentResult:
-        eb = input_data.evidence_bundle
-        gap = input_data.gap_analysis
-        insights = input_data.strategic_insights
-
-        # ── Serialize input data for LLM ──
-        evidence_json = self._serialize_evidence(eb)
-        gap_json = self._serialize_gap(gap)
-        strategy_json = self._serialize_strategy(insights)
-
-        # ── Call LLM ──
         try:
+            eb = input_data.evidence_bundle
+            gap = input_data.gap_analysis
+            insights = input_data.strategic_insights
+
+            # ── Serialize input data for LLM ──
+            evidence_json = self._serialize_evidence(eb)
+            gap_json = self._serialize_gap(gap)
+            strategy_json = self._serialize_strategy(insights)
+
+            # ── Call LLM ──
             result = await llm_client.generate(
                 system_prompt=SYSTEM_PROMPT,
                 user_prompt=build_report_prompt(
@@ -94,9 +95,10 @@ class ReportAgent(BaseAgent[ReportInput, ReportOutput]):
                 temperature=0.5,
             )
         except Exception as e:
+            traceback.print_exc()
             return AgentResult(
                 success=False,
-                error=f"LLM 调用失败: {e}",
+                error=f"Report Agent 执行失败: {type(e).__name__}: {str(e)[:200]}",
             )
 
         markdown_content = (result.content or "").strip()
@@ -138,82 +140,141 @@ class ReportAgent(BaseAgent[ReportInput, ReportOutput]):
             metadata={
                 "total_word_count": total_words,
                 "generated_at": now,
-                "sources_count": len(eb.sources_used),
+                "sources_count": len(eb.get("sources_used", []) if isinstance(eb, dict) else getattr(eb, "sources_used", [])),
                 "template_used": input_data.template_version or "v1",
                 "llm_prompt_tokens": result.prompt_tokens,
                 "llm_completion_tokens": result.completion_tokens,
             },
         )
 
-        output = ReportOutput(report_document=doc)
+        output = ReportOutput(
+            report_document=doc,
+        )
         return AgentResult(success=True, output=output)
 
     # ── Serialization helpers ──
 
-    @staticmethod
-    def _serialize_evidence(eb: EvidenceBundleDTO) -> str:
-        """Serialize evidence items to JSON for LLM prompt."""
+    @classmethod
+    def _serialize_evidence(cls, eb) -> str:
+        """Serialize evidence to JSON for LLM prompt."""
         items = []
-        for item in eb.evidence_items[:30]:  # top 30 evidence items
-            items.append({
-                "id": item.id,
-                "title": item.title,
-                "source": item.source,
-                "url": item.url,
-                "dimension": item.category,
-                "content": item.content[:300],  # truncate long content
-                "confidence": item.confidence,
-                "date": item.date,
-            })
+        evidence_items = (
+            eb.get("evidence_items", []) if isinstance(eb, dict)
+            else getattr(eb, "evidence_items", [])
+        )
+        sources_used = (
+            eb.get("sources_used", []) if isinstance(eb, dict)
+            else getattr(eb, "sources_used", [])
+        )
+        for item in evidence_items[:30]:  # top 30 evidence items
+            if isinstance(item, dict):
+                items.append({
+                    "id": item.get("id", ""),
+                    "title": item.get("title", ""),
+                    "source": item.get("source", ""),
+                    "url": item.get("url", ""),
+                    "content": (item.get("content", "") or "")[:300],
+                    "category": item.get("category", ""),
+                    "confidence": item.get("confidence", ""),
+                    "date": item.get("date", ""),
+                })
+            else:
+                items.append({
+                    "id": getattr(item, "id", ""),
+                    "title": getattr(item, "title", ""),
+                    "source": getattr(item, "source", ""),
+                    "url": getattr(item, "url", ""),
+                    "content": (getattr(item, "content", "") or "")[:300],
+                    "category": getattr(item, "category", ""),
+                    "confidence": getattr(item, "confidence", ""),
+                    "date": getattr(item, "date", ""),
+                })
         return json.dumps(items, ensure_ascii=False, indent=2)
 
     @staticmethod
-    def _serialize_gap(gap: GapAnalysis) -> str:
+    def _safe_get(obj, key, default=None):
+        """Safely get key from dict or object. Returns default if obj is not dict-like."""
+        if obj is None:
+            return default
+        if isinstance(obj, dict):
+            return obj.get(key, default)
+        if hasattr(obj, key):
+            return getattr(obj, key, default)
+        return default
+
+    @classmethod
+    def _serialize_gap(cls, gap) -> str:
         """Serialize gap analysis to JSON for LLM prompt."""
-        pos = gap.positioning or {}
-        fm = gap.features.get("feature_matrix", []) if gap.features else []
-        caps = gap.gaps.get("capability_gaps", []) if gap.gaps else []
-        advs = gap.gaps.get("competitive_advantages", []) if gap.gaps else []
-        disadvs = gap.gaps.get("competitive_disadvantages", []) if gap.gaps else []
+        pos = gap.get("positioning") if isinstance(gap, dict) else gap.positioning or {}
+        if not isinstance(pos, dict):
+            pos = {}
+
+        features_data = gap.get("features") if isinstance(gap, dict) else gap.features
+        if isinstance(features_data, dict):
+            fm = features_data.get("feature_matrix", [])
+        else:
+            fm = getattr(features_data, "feature_matrix", []) if features_data else []
+
+        gaps_data = gap.get("gaps") if isinstance(gap, dict) else gap.gaps
+        if isinstance(gaps_data, dict):
+            caps = gaps_data.get("capability_gaps", [])
+            advs = gaps_data.get("competitive_advantages", [])
+            disadvs = gaps_data.get("competitive_disadvantages", [])
+        else:
+            caps = getattr(gaps_data, "capability_gaps", []) if gaps_data else []
+            advs = getattr(gaps_data, "competitive_advantages", []) if gaps_data else []
+            disadvs = getattr(gaps_data, "competitive_disadvantages", []) if gaps_data else []
+
+        def _safe_item(item, field, default=""):
+            if isinstance(item, dict):
+                return item.get(field, default)
+            return getattr(item, field, default)
 
         return json.dumps({
             "positioning": {
-                "our_positioning": pos.get("our_positioning", ""),
-                "competitor_positioning": pos.get("competitor_positioning", ""),
-                "positioning_diff": pos.get("positioning_diff", ""),
+                "our_positioning": cls._safe_get(pos, "our_positioning", ""),
+                "competitor_positioning": cls._safe_get(pos, "competitor_positioning", ""),
+                "positioning_diff": cls._safe_get(pos, "positioning_diff", ""),
             },
             "feature_matrix": [
-                {"feature": f.get("feature_name", ""),
-                 "our_score": f.get("our_score", "N/A"),
-                 "competitor_score": f.get("competitor_score", "N/A"),
-                 "evidence_refs": f.get("evidence_refs", [])}
-                for f in fm[:10]
+                {"feature": _safe_item(f, "feature_name", ""),
+                 "our_score": _safe_item(f, "our_score", "N/A"),
+                 "competitor_score": _safe_item(f, "competitor_score", "N/A"),
+                 "evidence_refs": _safe_item(f, "evidence_refs", [])}
+                for f in (fm if isinstance(fm, list) else [])[:10]
             ],
             "capability_gaps": [
-                {"description": c.get("description", ""),
-                 "evidence_refs": c.get("evidence_refs", [])}
-                for c in caps[:5]
+                {"description": _safe_item(c, "description", ""),
+                 "evidence_refs": _safe_item(c, "evidence_refs", [])}
+                for c in (caps if isinstance(caps, list) else [])[:5]
             ],
             "advantages": [
-                {"description": a.get("description", ""),
-                 "evidence_refs": a.get("evidence_refs", [])}
-                for a in advs[:3]
+                {"description": _safe_item(a, "description", ""),
+                 "evidence_refs": _safe_item(a, "evidence_refs", [])}
+                for a in (advs if isinstance(advs, list) else [])[:3]
             ],
             "disadvantages": [
-                {"description": d.get("description", ""),
-                 "evidence_refs": d.get("evidence_refs", [])}
-                for d in disadvs[:3]
+                {"description": _safe_item(d, "description", ""),
+                 "evidence_refs": _safe_item(d, "evidence_refs", [])}
+                for d in (disadvs if isinstance(disadvs, list) else [])[:3]
             ],
         }, ensure_ascii=False, indent=2)
 
-    @staticmethod
-    def _serialize_strategy(insights: StrategicInsights) -> str:
+    @classmethod
+    def _serialize_strategy(cls, insights) -> str:
         """Serialize strategy insights to JSON for LLM prompt."""
-        swot = insights.swot or insights
-        opps = insights.opportunities or []
-        risks = insights.risks or []
-        recs = insights.recommendations or []
-        roadmap = insights.roadmap or {}
+        if isinstance(insights, dict):
+            swot = insights.get("swot") or insights
+            opps = insights.get("opportunities") or []
+            risks = insights.get("risks") or []
+            recs = insights.get("recommendations") or []
+            roadmap = insights.get("roadmap") or {}
+        else:
+            swot = insights.swot or insights
+            opps = insights.opportunities or []
+            risks = insights.risks or []
+            recs = insights.recommendations or []
+            roadmap = insights.roadmap or {}
 
         def _swot_list(items):
             result = []
@@ -227,56 +288,84 @@ class ReportAgent(BaseAgent[ReportInput, ReportOutput]):
                                    "confidence": getattr(i, "confidence", "medium")})
             return result
 
+        def _opp_list(items):
+            result = []
+            for o in items[:5]:
+                if isinstance(o, dict):
+                    result.append({"title": o.get("title", ""), "description": o.get("description", ""),
+                                   "impact": o.get("impact", ""), "effort": o.get("effort", ""),
+                                   "confidence": o.get("confidence", "medium"),
+                                   "evidence_refs": o.get("evidence_refs", [])})
+                else:
+                    result.append({"title": getattr(o, "title", ""),
+                                   "description": getattr(o, "description", ""),
+                                   "impact": getattr(o, "impact", ""),
+                                   "effort": getattr(o, "effort", ""),
+                                   "confidence": getattr(o, "confidence", "medium"),
+                                   "evidence_refs": getattr(o, "evidence_refs", [])})
+            return result
+
+        def _rec_list(items):
+            result = []
+            for r in items[:5]:
+                if isinstance(r, dict):
+                    result.append({"action": r.get("action", ""), "rationale": r.get("rationale", ""),
+                                   "priority": r.get("priority", ""), "timeline": r.get("timeline", ""),
+                                   "kpi": r.get("kpi", None), "expected_value": r.get("expected_value", ""),
+                                   "evidence_refs": r.get("evidence_refs", [])})
+                else:
+                    result.append({"action": getattr(r, "action", ""),
+                                   "rationale": getattr(r, "rationale", ""),
+                                   "priority": getattr(r, "priority", ""),
+                                   "timeline": getattr(r, "timeline", ""),
+                                   "kpi": getattr(r, "kpi", None),
+                                   "expected_value": getattr(r, "expected_value", ""),
+                                   "evidence_refs": getattr(r, "evidence_refs", [])})
+            return result
+
+        def _risk_list(items):
+            result = []
+            for r in items[:5]:
+                if isinstance(r, dict):
+                    result.append({"title": r.get("title", ""), "description": r.get("description", ""),
+                                   "probability": r.get("probability", ""), "impact": r.get("impact", ""),
+                                   "mitigation": r.get("mitigation", ""),
+                                   "evidence_refs": r.get("evidence_refs", [])})
+                else:
+                    result.append({"title": getattr(r, "title", ""),
+                                   "description": getattr(r, "description", ""),
+                                   "probability": getattr(r, "probability", ""),
+                                   "impact": getattr(r, "impact", ""),
+                                   "mitigation": getattr(r, "mitigation", ""),
+                                   "evidence_refs": getattr(r, "evidence_refs", [])})
+            return result
+
         return json.dumps({
             "swot": {
-                "strengths": _swot_list(swot.get("strengths", []) if isinstance(swot, dict) else getattr(swot, "strengths", [])),
-                "weaknesses": _swot_list(swot.get("weaknesses", []) if isinstance(swot, dict) else getattr(swot, "weaknesses", [])),
-                "opportunities": _swot_list(swot.get("opportunities", []) if isinstance(swot, dict) else getattr(swot, "opportunities", [])),
-                "threats": _swot_list(swot.get("threats", []) if isinstance(swot, dict) else getattr(swot, "threats", [])),
+                "strengths": _swot_list(getattr(swot, "strengths", []) if hasattr(swot, "strengths") else []),
+                "weaknesses": _swot_list(getattr(swot, "weaknesses", []) if hasattr(swot, "weaknesses") else []),
+                "opportunities": _swot_list(getattr(swot, "opportunities", []) if hasattr(swot, "opportunities") else []),
+                "threats": _swot_list(getattr(swot, "threats", []) if hasattr(swot, "threats") else []),
             },
-            "opportunities": [
-                {"title": o.get("title", "") if isinstance(o, dict) else getattr(o, "title", ""),
-                 "description": (o.get("description", "") if isinstance(o, dict) else getattr(o, "description", ""))[:200],
-                 "impact": o.get("impact", "medium") if isinstance(o, dict) else getattr(o, "impact", "medium")}
-                for o in (opps[:5] if isinstance(opps, list) else [])
+            "opportunities": _opp_list(opps),
+            "risks": _risk_list(risks),
+            "recommendations": _rec_list(recs),
+            "roadmap_phases": [
+                {"phase": (p.get("phase","") if hasattr(p,"get") else getattr(p,"phase","")), "initiatives": (p.get("initiatives",[]) if hasattr(p,"get") else getattr(p,"initiatives",[]))}
+                for p in (roadmap.get("phases", []) if isinstance(roadmap, dict) else [])[:3]
             ],
-            "risks": [
-                {"title": r.get("title", "") if isinstance(r, dict) else getattr(r, "title", ""),
-                 "probability": r.get("probability", "medium") if isinstance(r, dict) else getattr(r, "probability", "medium"),
-                 "mitigation": (r.get("mitigation", "") if isinstance(r, dict) else getattr(r, "mitigation", ""))[:100]}
-                for r in (risks[:3] if isinstance(risks, list) else [])
-            ],
-            "recommendations": [
-                {"action": r.get("action", "") if isinstance(r, dict) else getattr(r, "action", ""),
-                 "rationale": (r.get("rationale", "") if isinstance(r, dict) else getattr(r, "rationale", ""))[:150],
-                 "expected_value": r.get("expected_value", "") if isinstance(r, dict) else getattr(r, "expected_value", ""),
-                 "priority": r.get("priority", "p2") if isinstance(r, dict) else getattr(r, "priority", "p2")}
-                for r in (recs[:5] if isinstance(recs, list) else [])
-            ],
-            "roadmap": {
-                "phases": [
-                    {"phase": p.get("phase", ""),
-                     "initiatives": p.get("initiatives", [])[:5]}
-                    for p in (roadmap.get("phases", []) if isinstance(roadmap, dict) else [])
-                ]
-            },
         }, ensure_ascii=False, indent=2)
 
-    # ── HTML conversion ──
+    # ── Markdown → HTML ──
 
     @staticmethod
     def _markdown_to_html(md_text: str, input_data: ReportInput) -> str:
-        """Convert Markdown to self-contained HTML page using builders."""
         html = HTMLBuilder()
+        html.add_title(f"{input_data.our_company} vs {input_data.competitor_company} 竞品分析报告")
+        html.add_meta(f"产品：{input_data.product} | 分析目标：{input_data.objective}")
         now = datetime.utcnow().strftime("%Y-%m-%d %H:%M")
-        html.cover(
-            input_data.our_company,
-            input_data.competitor_company,
-            input_data.product,
-            now,
-        )
+        html.add_meta(f"生成日期：{now}")
 
-        # Simple Markdown → HTML conversion for the body
         lines = md_text.split("\n")
         in_table = False
         table_headers: list[str] = []
@@ -284,41 +373,36 @@ class ReportAgent(BaseAgent[ReportInput, ReportOutput]):
 
         for line in lines:
             stripped = line.strip()
-
-            # Skip the cover/title part already handled by html.cover()
-            if stripped.startswith("# ") and "竞品分析报告" in stripped:
-                continue
-            if stripped.startswith("> **我方**"):
-                continue
-            if stripped.startswith("---"):
-                if in_table:
-                    if table_headers and table_rows:
-                        html.table(table_headers, table_rows)
-                    table_headers = []
+            if not stripped:
+                # End of table
+                if in_table and table_headers and table_rows:
+                    html.table(table_headers, table_rows)
                     table_rows = []
+                    table_headers = []
                     in_table = False
-                html.separator()
                 continue
 
             # Tables
-            if "|" in stripped and not stripped.startswith(">"):
-                cells = [c.strip() for c in stripped.strip("|").split("|")]
-                if all(c == "---" or c == "------" or re.match(r"^-+:?-*$", c) for c in cells):
-                    # Separator row — skip
-                    continue
+            if "|" in stripped and not stripped.startswith("#"):
                 if not in_table:
-                    table_headers = cells
                     in_table = True
+                cells = [c.strip() for c in stripped.split("|") if c.strip()]
+                # Skip separator rows
+                if all(c.replace("-", "").replace(":", "").strip() == "" for c in cells):
+                    continue
+                if not table_headers:
+                    table_headers = cells
                 else:
                     table_rows.append(cells)
                 continue
-            else:
-                if in_table:
-                    if table_headers and table_rows:
-                        html.table(table_headers, table_rows)
-                    table_headers = []
-                    table_rows = []
-                    in_table = False
+
+            # End table on non-table content
+            if in_table:
+                if table_headers and table_rows:
+                    html.table(table_headers, table_rows)
+                table_rows = []
+                table_headers = []
+                in_table = False
 
             # Headings
             if stripped.startswith("## "):
