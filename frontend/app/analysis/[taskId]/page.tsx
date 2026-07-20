@@ -5,9 +5,9 @@ import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { ProgressTracker } from "@/components/progress-tracker";
-import { createReport, getProgress, subscribeProgress } from "@/lib/api";
+import { createReport, getProgress, subscribeProgress, ApiError } from "@/lib/api";
 import { saveToHistory } from "@/lib/utils";
-import type { AnalysisInput, PhaseRecord, StreamEvent } from "@/types";
+import type { AnalysisInput, PhaseRecord, StreamEvent, DiagnosisInfo } from "@/types";
 
 const POLL_INTERVAL = 800;
 const MAX_WAIT_SECONDS = 600;
@@ -192,9 +192,29 @@ export default function AnalysisProgressPage({
         sessionStorage.removeItem("pending_analysis");
         // Start polling with server task_id
         setState({ type: "polling", taskId: state.taskId, serverTaskId: result.task_id });
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : "创建分析任务失败";
-        setState({ type: "error", message: msg });
+      } catch (err: any) {
+        if (err instanceof ApiError) {
+          const detail = err.detail;
+          const diag = detail?.diagnosis;
+          setState({
+            type: "error",
+            message: typeof detail === "string" ? detail : (detail?.detail || detail?.message || "创建分析任务失败"),
+            diagnosis: diag || (detail && typeof detail === "object" ? {
+              error_type: `HTTP_${err.status}`,
+              root_cause: detail?.detail || String(err.detail || ""),
+              suggestion: err.status >= 500 ? "请检查后端日志排查问题" : "请检查输入参数或联系管理员",
+              retry_available: err.status >= 500,
+            } : undefined),
+          });
+        } else {
+          const msg = err instanceof Error ? err.message : "创建分析任务失败";
+          setState({ type: "error", message: msg, diagnosis: {
+            error_type: "NETWORK_ERROR",
+            root_cause: msg.includes("Failed to fetch") ? "后端服务可能未运行或端口被占用" : "创建任务时发生异常",
+            suggestion: "请确认后端已启动: bash start.sh",
+            retry_available: true,
+          } });
+        }
       }
     };
     doCreate();
@@ -242,7 +262,7 @@ export default function AnalysisProgressPage({
               setProgress(PHASE_STEP_PROGRESS[completedKey] || progress);
             }
           }
-          updateETA(event.status, state.serverTaskId);
+          updateETA(event.status || "", state.serverTaskId);
         }
       },
       (status: string) => {
@@ -280,7 +300,7 @@ export default function AnalysisProgressPage({
     if (state.type !== "polling") return;
 
     const timeout = setTimeout(() => {
-      setState({ type: "timeout", taskId: state.serverTaskId });
+      setState({ type: "timeout" });
     }, MAX_WAIT_SECONDS * 1000);
 
     const interval = setInterval(async () => {
@@ -296,7 +316,7 @@ export default function AnalysisProgressPage({
           clearTimeout(timeout);
           // Try to fetch report first
           try {
-            const res = await fetch(`${process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8000"}/api/reports/${state.serverTaskId}`);
+            const res = await fetch(`/api/reports/${state.serverTaskId}`);
             if (res.ok) {
               setState({ type: "completed", taskId: state.serverTaskId });
               router.push(`/report/${state.serverTaskId}`);
@@ -309,7 +329,7 @@ export default function AnalysisProgressPage({
           clearTimeout(timeout);
           // Try to fetch diagnosis
           try {
-            const diagRes = await fetch(`${process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8000"}/api/traces/${state.serverTaskId}/diagnosis`);
+            const diagRes = await fetch(`/api/traces/${state.serverTaskId}/diagnosis`);
             if (diagRes.ok) {
               const diag = await diagRes.json();
               setState({ type: "error", message: data.error_info || "分析任务失败", diagnosis: diag });
@@ -326,12 +346,43 @@ export default function AnalysisProgressPage({
           updateETA(data.status, state.serverTaskId);
         }
       } catch (err: any) {
-        // Task may not be ready yet — keep polling
-        const elapsed = (Date.now() - startTime()) / 1000;
-        if (elapsed > 10 && (err?.message?.includes("404") || err?.message?.includes("fetch"))) {
+        // Check error type for better diagnosis
+        if (err instanceof ApiError) {
           clearInterval(interval);
           clearTimeout(timeout);
-          setState({ type: "error", message: "分析任务已丢失（后台服务可能已重启），请返回首页重新创建" });
+          const detail = err.detail;
+          const diag = detail?.diagnosis;
+          let errMsg = typeof detail === "string" ? detail : (detail?.detail || detail?.message || "分析失败");
+          if (err.status === 404) {
+            errMsg = "分析任务已丢失（后台服务可能已重启），请返回首页重新创建";
+          }
+          setState({
+            type: "error",
+            message: errMsg,
+            diagnosis: diag || (detail && typeof detail === "object" ? {
+              error_type: `HTTP_${err.status}`,
+              root_cause: detail?.detail || String(err.detail || "服务器返回错误"),
+              suggestion: err.status === 404 ? "返回首页重新创建分析任务" : "请检查后端日志排查问题",
+              retry_available: err.status >= 500 || err.status === 404,
+            } : undefined),
+          });
+        } else {
+          // Task may not be ready yet — keep polling
+          const elapsed = (Date.now() - startTime()) / 1000;
+          if (elapsed > 10 && (err?.message?.includes("404") || err?.message?.includes("Failed to fetch"))) {
+            clearInterval(interval);
+            clearTimeout(timeout);
+            const isFetch = err?.message?.includes("Failed to fetch");
+            const reason = isFetch
+              ? "无法连接后端服务 — 后台服务可能已崩溃或未启动"
+              : "任务未找到 (HTTP 404) — 后台服务可能已重启";
+            setState({ type: "error", message: reason, diagnosis: {
+              error_type: isFetch ? "NETWORK_ERROR" : "TASK_NOT_FOUND",
+              root_cause: "后台服务在分析过程中重启或不可达，内存中的任务数据已丢失",
+              suggestion: "请返回首页重新创建分析任务。如持续失败，请关闭所有进程后执行 bash start.sh 重启",
+              retry_available: true,
+            } });
+          }
         }
       }
     }, POLL_INTERVAL);
@@ -435,7 +486,9 @@ export default function AnalysisProgressPage({
         <div className="text-center space-y-4">
           <div className="text-4xl">❌</div>
           <h2 className="text-xl font-semibold">分析失败</h2>
-          <p className="text-muted-foreground">{state.message}</p>
+          <div className="bg-destructive/10 border border-destructive/30 rounded-lg p-3 text-left">
+            <p className="text-sm font-mono break-all text-destructive">{state.message}</p>
+          </div>
         </div>
         {state.diagnosis && (
           <Card className="p-4 space-y-2 bg-destructive/5 border-destructive/20">

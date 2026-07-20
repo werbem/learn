@@ -83,29 +83,68 @@ class ReportAgent(BaseAgent[ReportInput, ReportOutput]):
             result = await llm_client.generate(
                 system_prompt=SYSTEM_PROMPT,
                 user_prompt=build_report_prompt(
-                    our_company=input_data.our_company,
-                    competitor_company=input_data.competitor_company,
-                    product=input_data.product,
-                    objective=input_data.objective,
+                    our_company=input_data.our_company if hasattr(input_data, 'our_company') else "我方",
+                    competitor_company=input_data.competitor_company if hasattr(input_data, 'competitor_company') else "竞品",
+                    product=input_data.product if hasattr(input_data, 'product') else "产品",
+                    objective=input_data.objective if hasattr(input_data, 'objective') else "competitive_defense",
                     evidence_json=evidence_json,
                     gap_json=gap_json,
                     strategy_json=strategy_json,
                 ),
                 response_model=None,
                 temperature=0.5,
+                timeout=120.0,
             )
         except Exception as e:
             traceback.print_exc()
+            # Generate fallback report from available data
+            fallback_md = self._build_fallback_report(input_data, evidence_json, gap_json, strategy_json)
+            try:
+                html_content = self._markdown_to_html(fallback_md, input_data)
+            except Exception:
+                html_content = f"<html><body><h1>竞品分析报告</h1><pre>{fallback_md[:5000]}</pre></body></html>"
+            sections = []
+            try:
+                sections = self._extract_sections(fallback_md)
+            except Exception:
+                pass
+            total_words = len(fallback_md.replace("\n", ""))
+            doc = ReportDocument(
+                formats=ReportFormatsDTO(markdown=fallback_md, html=html_content, docx_url=None),
+                sections=sections,
+                metadata={"total_word_count": total_words, "generated_at": datetime.utcnow().isoformat(), "sources_count": 0, "template_used": "v1", "llm_prompt_tokens": 0, "llm_completion_tokens": 0},
+            )
+            output = ReportOutput(report_document=doc)
             return AgentResult(
-                success=False,
-                error=f"Report Agent 执行失败: {type(e).__name__}: {str(e)[:200]}",
+                success=True,
+                output=output,
+                error={"code": "REPORT_ERROR", "message": f"Report Agent 执行失败，使用回退报告: {type(e).__name__}: {str(e)[:200]}"},
             )
 
         markdown_content = (result.content or "").strip()
         if not markdown_content or markdown_content.startswith("["):
+            # LLM returned empty/invalid — use fallback
+            fallback_md = self._build_fallback_report(input_data, evidence_json, gap_json, strategy_json)
+            try:
+                html_content = self._markdown_to_html(fallback_md, input_data)
+            except Exception:
+                html_content = f"<html><body><h1>竞品分析报告</h1><pre>{fallback_md[:5000]}</pre></body></html>"
+            sections = []
+            try:
+                sections = self._extract_sections(fallback_md)
+            except Exception:
+                pass
+            total_words = len(fallback_md.replace("\n", ""))
+            doc = ReportDocument(
+                formats=ReportFormatsDTO(markdown=fallback_md, html=html_content, docx_url=None),
+                sections=sections,
+                metadata={"total_word_count": total_words, "generated_at": datetime.utcnow().isoformat(), "sources_count": 0, "template_used": "v1", "llm_prompt_tokens": 0, "llm_completion_tokens": 0},
+            )
+            output = ReportOutput(report_document=doc)
             return AgentResult(
-                success=False,
-                error=f"LLM 返回空或异常: {markdown_content[:200]}",
+                success=True,
+                output=output,
+                error={"code": "REPORT_ERROR", "message": f"LLM 返回空或异常，使用回退报告: {markdown_content[:200]}"},
             )
 
         # ── Strip code fences if present ──
@@ -115,16 +154,33 @@ class ReportAgent(BaseAgent[ReportInput, ReportOutput]):
             markdown_content = markdown_content.rsplit("```", 1)[0]
         markdown_content = markdown_content.strip()
 
-        # ── Generate HTML ──
-        html_content = self._markdown_to_html(markdown_content, input_data)
+        # ── Generate HTML (try/except — don't lose markdown on failure) ──
+        try:
+            html_content = self._markdown_to_html(markdown_content, input_data)
+        except Exception as html_err:
+            traceback.print_exc()
+            html_content = (
+                f"<html><body><h1>竞品分析报告</h1>"
+                f"<p>HTML 生成失败: {html_err}. 请查看 Markdown 版本。</p>"
+                f"<pre>{markdown_content[:5000]}</pre>"
+                f"</body></html>"
+            )
 
         # ── Generate Word (.docx) ──
         word_path = ""
-        if "docx" in input_data.output_formats:
-            word_path = self._save_word(markdown_content, input_data)
+        try:
+            if "docx" in input_data.output_formats:
+                word_path = self._save_word(markdown_content, input_data)
+        except Exception as word_err:
+            traceback.print_exc()
+            word_path = ""
 
         # ── Extract sections ──
-        sections = self._extract_sections(markdown_content)
+        try:
+            sections = self._extract_sections(markdown_content)
+        except Exception:
+            traceback.print_exc()
+            sections = []
 
         # ── Build output ──
         total_words = len(markdown_content.replace("\n", ""))
@@ -146,11 +202,17 @@ class ReportAgent(BaseAgent[ReportInput, ReportOutput]):
                 "llm_completion_tokens": result.completion_tokens,
             },
         )
+        output = ReportOutput(report_document=doc)
 
-        output = ReportOutput(
-            report_document=doc,
+        return AgentResult(
+            success=True,
+            output=output,
+            phase_record={
+                "phase": self.agent_name,
+                "entered_at": getattr(ctx, "phase_entered_at", None) or now,
+                "duration_ms": 0,  # overridden by aexecute wrapper
+            },
         )
-        return AgentResult(success=True, output=output)
 
     # ── Serialization helpers ──
 
@@ -356,12 +418,93 @@ class ReportAgent(BaseAgent[ReportInput, ReportOutput]):
             ],
         }, ensure_ascii=False, indent=2)
 
+
+    # ── Fallback report without LLM ──
+
+    @classmethod
+    def _build_fallback_report(cls, input_data, evidence_json, gap_json, strategy_json) -> str:
+        """Generate a minimal report from available data without LLM."""
+        our = getattr(input_data, "our_company", "") or "我方"
+        comp = getattr(input_data, "competitor_company", "") or "竞品"
+        prod = getattr(input_data, "product", "") or "产品"
+        obj = getattr(input_data, "objective", "") or "竞品分析"
+
+        lines = [
+            f"# {our} vs {comp} 竞品分析报告",
+            "",
+            f"**产品**: {prod}",
+            f"**分析目标**: {obj}",
+            f"**生成日期**: {datetime.utcnow().strftime("%Y-%m-%d %H:%M")}",
+            "",
+            "> ⚠️ 本报告由系统自动生成（LLM 服务暂时不可用）。数据基于已收集的证据和策略分析。",
+            "",
+            "## 一、证据收集概况",
+            "",
+        ]
+        # Evidence summary
+        try:
+            ev = json.loads(evidence_json) if isinstance(evidence_json, str) else evidence_json
+            items = ev.get("evidence_summary", [])
+            lines.append(f"- 共收集 {len(items)} 条证据")
+            sources = ev.get("sources_used", [])
+            if sources:
+                lines.append(f"- 来源: {', '.join(str(s) for s in sources[:10])}")
+        except Exception:
+            lines.append("- 证据数据暂时无法解析")
+        lines.append("")
+
+        # Gap summary
+        lines.append("## 二、竞品差距分析")
+        try:
+            gap = json.loads(gap_json) if isinstance(gap_json, str) else gap_json
+            positioning = gap.get("positioning", {})
+            if positioning and isinstance(positioning, dict):
+                our_pos = positioning.get("our_positioning", "未分析")
+                comp_pos = positioning.get("competitor_positioning", "未分析")
+                lines.append(f"- 我方定位: {str(our_pos)[:200]}")
+                lines.append(f"- 竞品定位: {str(comp_pos)[:200]}")
+            caps = gap.get("capability_gaps", [])
+            if caps:
+                lines.append(f"- 发现 {len(caps)} 个能力差距")
+                for c in caps[:5]:
+                    lines.append(f"  - {str(c.get('description', c))[:150]}")
+        except Exception:
+            lines.append("- 差距分析数据暂时无法解析")
+        lines.append("")
+
+        # Strategy summary
+        lines.append("## 三、策略建议")
+        try:
+            strat = json.loads(strategy_json) if isinstance(strategy_json, str) else strategy_json
+            recs = strat.get("recommendations", [])
+            if recs:
+                lines.append(f"共 {len(recs)} 条建议:")
+                for r in recs[:5]:
+                    action = r.get("action", str(r))
+                    lines.append(f"- {str(action)[:200]}")
+            swot = strat.get("swot", {})
+            strengths = swot.get("strengths", [])
+            if strengths:
+                lines.append(f"- 优势项: {len(strengths)} 个")
+            weaknesses = swot.get("weaknesses", [])
+            if weaknesses:
+                lines.append(f"- 劣势项: {len(weaknesses)} 个")
+        except Exception:
+            lines.append("- 策略数据暂时无法解析")
+        lines.append("")
+
+        lines.append("---")
+        lines.append(f"*报告由 AI 竞品分析助手自动生成*")
+
+        return "\n".join(lines)
+
     # ── Markdown → HTML ──
+
 
     @staticmethod
     def _markdown_to_html(md_text: str, input_data: ReportInput) -> str:
         html = HTMLBuilder()
-        html.add_title(f"{input_data.our_company} vs {input_data.competitor_company} 竞品分析报告")
+        html.h1(f"{input_data.our_company} vs {input_data.competitor_company} 竞品分析报告")
         html.add_meta(f"产品：{input_data.product} | 分析目标：{input_data.objective}")
         now = datetime.utcnow().strftime("%Y-%m-%d %H:%M")
         html.add_meta(f"生成日期：{now}")
@@ -414,7 +557,10 @@ class ReportAgent(BaseAgent[ReportInput, ReportOutput]):
                 html.h3(heading)
             elif stripped.startswith("# "):
                 heading = stripped[2:]
-                html.h1(heading)
+                if hasattr(html, 'h1'):
+                    html.h1(heading)
+                elif hasattr(html, 'add_title'):
+                    html.add_title(heading)
             elif stripped.startswith("> "):
                 html.quote(stripped[2:])
             elif stripped.startswith("- "):

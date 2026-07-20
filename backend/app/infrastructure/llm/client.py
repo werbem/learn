@@ -154,6 +154,7 @@ class LLMClient:
         user_prompt: str,
         response_model: type[BaseModel] | None = None,
         temperature: float = 0.7,
+        timeout: float | None = None,
     ) -> LLMResponse:
         """Generate a response.
 
@@ -240,6 +241,7 @@ class LLMClient:
         user_prompt: str,
         response_model: type[BaseModel] | None = None,
         temperature: float = 0.7,
+        timeout: float | None = None,
     ) -> LLMResponse:
         messages = [
             {"role": "system", "content": system_prompt},
@@ -250,7 +252,7 @@ class LLMClient:
             "model": self.model,
             "messages": messages,
             "temperature": temperature,
-            "timeout": _TIMEOUT,
+            "timeout": timeout if timeout is not None else _TIMEOUT,
         }
 
         # Structured Outputs support (gpt-4o-mini+)
@@ -357,7 +359,7 @@ class LLMClient:
                 messages=messages,
                 temperature=0.7,
                 stream=True,
-                timeout=_TIMEOUT,
+                timeout=timeout if timeout is not None else _TIMEOUT,
             )
             async for chunk in stream:
                 delta = chunk.choices[0].delta if chunk.choices else None

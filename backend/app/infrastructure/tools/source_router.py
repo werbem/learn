@@ -90,15 +90,20 @@ class SourceRouter:
         Returns:
             SourceExecutionPlan with resolved source types
         """
-        dimensions = research_plan.analysis_scope if research_plan.analysis_scope else []
+        if isinstance(research_plan, dict):
+            dimensions = research_plan.get("analysis_scope", []) or []
+            objective = research_plan.get("objective", "") or ""
+        else:
+            dimensions = research_plan.analysis_scope if research_plan.analysis_scope else []
+            objective = research_plan.objective if research_plan.objective else ""
         keywords = self._collect_keywords(research_plan)
-        objective = research_plan.objective if research_plan.objective else ""
 
         if dimensions:
             plan = self._dim_router.build(dimensions, keywords, objective)
         else:
             # Fallback: use task source_types directly
-            source_types = list({t.source_type for t in research_plan.research_tasks})
+            rts = research_plan.get("research_tasks", []) if isinstance(research_plan, dict) else research_plan.research_tasks
+            source_types = list({t.get("source_type") if isinstance(t, dict) else t.source_type for t in rts})
             plan = SourceExecutionPlan(
                 dimensions=[],
                 source_types=source_types if source_types else [SourceType.WEB],
@@ -138,8 +143,11 @@ class SourceRouter:
             if not sources:
                 continue
             for source in sources:
-                # Use all keywords for each source
-                kw = plan.keywords[0] if plan.keywords else plan.objective
+                # Build a combined query from multiple keywords for better coverage
+                if plan.keywords:
+                    kw = " ".join(plan.keywords[:5])  # Use top 5 keywords
+                else:
+                    kw = plan.objective
                 executions.append((source, kw, stype))
 
         if not executions:
@@ -188,7 +196,7 @@ class SourceRouter:
             if not sources:
                 continue
             for source in sources:
-                for kw in task.keywords[:1]:
+                for kw in task.keywords[:3]:
                     executions.append((source, kw, task.source_type))
 
         if not executions:
@@ -216,12 +224,20 @@ class SourceRouter:
     # ── Utilities ──
 
     @staticmethod
-    def _collect_keywords(plan: ResearchPlan) -> list[str]:
-        """Collect all unique keywords from research_tasks."""
+    @staticmethod
+    def _collect_keywords(plan) -> list[str]:
+        """Collect all unique keywords from research_tasks (dict-safe)."""
         seen: set[str] = set()
         result: list[str] = []
-        for task in plan.research_tasks:
-            for kw in task.keywords:
+        if plan is None:
+            return result
+        tasks = plan.get("research_tasks", []) if isinstance(plan, dict) else getattr(plan, "research_tasks", [])
+        for task in tasks:
+            if isinstance(task, dict):
+                kws = task.get("keywords", []) or []
+            else:
+                kws = getattr(task, "keywords", []) or []
+            for kw in kws:
                 if kw not in seen:
                     seen.add(kw)
                     result.append(kw)

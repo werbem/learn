@@ -64,6 +64,11 @@ if [ ! -d "$ROOT_DIR/frontend/.next" ]; then
     echo ""
 fi
 
+# ── Kill any existing processes on target ports ──
+echo "🧹 Cleaning ports 8000 and 3000..."
+lsof -ti:8000 -ti:3000 | xargs kill -9 2>/dev/null || true
+sleep 1
+
 # ── Start services ──
 echo "🚀 Starting services... (Ctrl+C to stop)"
 echo ""

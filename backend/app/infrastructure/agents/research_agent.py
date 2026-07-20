@@ -43,6 +43,13 @@ from app.infrastructure.tools.source_selection import source_selection
 from app.infrastructure.tools.llm_router import llm_router
 
 
+def _dget(obj, key, default=None):
+    """Safe dict/object access."""
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
+
 class ResearchAgent(BaseAgent[ResearchInput, ResearchOutput]):
     """Research Agent — multi-source evidence collection.
 
@@ -66,15 +73,15 @@ class ResearchAgent(BaseAgent[ResearchInput, ResearchOutput]):
         3. LLM extract evidence
         4. Build output
         """
-        objective = input_data.research_plan.objective if input_data.research_plan else (
+        objective = (input_data.research_plan.get("objective", "") if isinstance(input_data.research_plan, dict) else input_data.research_plan.objective) if input_data.research_plan else (
             f"分析 {input_data.competitor_company} 的 {input_data.product}"
         )
 
         # Step 1: Build Source Selection Plan (LLM-driven with rule-based fallback)
-        if input_data.research_plan and input_data.research_plan.analysis_scope:
+        if input_data.research_plan and _dget(input_data.research_plan, "analysis_scope", []):
             sel_plan = await llm_router.route(
-                dimensions=input_data.research_plan.analysis_scope,
-                keywords=source_router._collect_keywords(input_data.research_plan),
+                dimensions=_dget(input_data.research_plan, "analysis_scope", []),
+                keywords=source_router._collect_keywords(input_data.research_plan) if input_data.research_plan else [],
                 objective=objective,
                 task_id=ctx.task_id,
             )

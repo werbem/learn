@@ -52,6 +52,7 @@ class ReportDetailResponse(BaseModel):
     generated_at: Optional[datetime] = None
     status: Optional[str] = None
     error: Optional[str] = None
+    diagnosis: Optional[dict] = None
     created_at: datetime
 
 

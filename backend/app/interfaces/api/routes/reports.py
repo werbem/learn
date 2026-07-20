@@ -155,7 +155,8 @@ async def create_report(body: ReportCreateRequest) -> ReportCreateResponse:
                 objective=body.scene or body.objective,
                 markdown=(report_doc or {}).get("formats", {}).get("markdown"),
                 html=(report_doc or {}).get("formats", {}).get("html"),
-                word_url=(report_doc or {}).get("formats", {}).get("docx_url"),
+                # Convert filesystem path to API URL for frontend
+                word_url=f"/api/reports/{task_id_str}/download" if (report_doc or {}).get("formats", {}).get("docx_url") else None,
                 sections=[ReportSectionDTO(**s) for s in sections_data],
                 total_word_count=(report_doc or {}).get("metadata", {}).get("total_word_count", 0),
                 created_at=datetime.utcnow(),
@@ -235,6 +236,29 @@ async def get_report(task_id: UUID) -> ReportDetailResponse:
             )
         raise HTTPException(status_code=404, detail="报告不存在")
     return ReportDetailResponse(**report)
+
+
+
+@router.get("/{task_id}/download")
+async def download_report(task_id: UUID):
+    """Download the Word report file by task ID."""
+    from fastapi.responses import FileResponse
+    import os
+
+    report = _reports.get(str(task_id))
+    if not report:
+        raise HTTPException(status_code=404, detail="报告不存在")
+
+    word_url = report.get("word_url")
+    if not word_url or not os.path.exists(word_url):
+        raise HTTPException(status_code=404, detail="Word文件不存在或尚未生成")
+
+    filename = os.path.basename(word_url)
+    return FileResponse(
+        path=word_url,
+        filename=filename,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    )
 
 
 @router.delete("/{task_id}")

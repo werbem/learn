@@ -18,6 +18,8 @@ class Phase(str, Enum):
     RESEARCHED = "researched"
     COMPARING = "comparing"
     COMPARED = "compared"
+    INSIGHTING = "insighting"
+    INSIGHTED = "insighted"
     STRATEGIZING = "strategizing"
     STRATEGIZED = "strategized"
     REPORTING = "reporting"

@@ -143,6 +143,14 @@ class HTMLBuilder:
             self._parts.append(f"<li><a href='#{sid}'>{title}</a></li>")
         self._parts.append("</ul></div>")
 
+    def add_title(self, text: str) -> None:
+        """Cover title block."""
+        self._parts.append(f'<div class="cover"><h1>{text}</h1></div>')
+
+    def h1(self, text: str) -> None:
+        """H1 heading."""
+        self._parts.append(f"<h1>{text}</h1>")
+
     def h2(self, text: str, sid: str = "") -> None:
         aid = f" id='{sid}'" if sid else ""
         self._parts.append(f"<h2{aid}>{text}</h2>")
@@ -360,6 +368,9 @@ class WordBuilder:
     # ── Method aliases for builder consistency ──
     def para(self, text: str) -> None:
         self.add_para(text)
+
+    def h1(self, text: str) -> None:
+        self.add_h1(text)
 
     def quote(self, text: str) -> None:
         self.add_quote(text)

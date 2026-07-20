@@ -26,6 +26,12 @@ from app.infrastructure.agents.review_prompt import (
 )
 from app.infrastructure.llm.client import llm_client
 
+def _dget(obj, key, default=None):
+    """Safe dict/object access — handles both Pydantic models and plain dicts."""
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
 
 class ReviewAgent(BaseAgent[ReviewInput, ReviewOutput]):
 
@@ -42,7 +48,31 @@ class ReviewAgent(BaseAgent[ReviewInput, ReviewOutput]):
         eb = input_data.evidence_bundle
 
         # ── Extract Markdown report ──
-        report_md = report_data.formats.markdown or ""
+        # ── Dict-safe extraction of report markdown (handles flat, nested, and str types) ──
+        if not isinstance(report_data, (dict, type(None))):
+            # If report_data is a string or unexpected type, use it as-is in fallback
+            try:
+                report_md = str(report_data) if report_data else ""
+            except Exception:
+                report_md = ""
+        elif isinstance(report_data, dict):
+            # Try nested: report_data["formats"]["markdown"]
+            formats = report_data.get("formats", None)
+            if isinstance(formats, dict):
+                report_md = formats.get("markdown", "") or ""
+            elif isinstance(formats, str):
+                report_md = formats
+            else:
+                # Flat: report_data["markdown"]
+                report_md = report_data.get("markdown", "") or ""
+        elif hasattr(report_data, "formats"):
+            formats_obj = getattr(report_data, "formats", None)
+            if hasattr(formats_obj, "markdown"):
+                report_md = getattr(formats_obj, "markdown", "") or ""
+            else:
+                report_md = getattr(report_data, "markdown", "") or ""
+        else:
+            report_md = getattr(report_data, "markdown", "") or ""
         if not report_md:
             return AgentResult(
                 success=False,
@@ -51,12 +81,16 @@ class ReviewAgent(BaseAgent[ReviewInput, ReviewOutput]):
 
         # ── Serialize evidence for LLM ──
         evidence_items = []
-        for item in eb.evidence_items[:30]:
+        try:
+            ev_items = _dget(eb, "evidence_items", [])
+        except Exception:
+            ev_items = []
+        for item in (ev_items[:30] if ev_items else []):
             evidence_items.append({
-                "id": item.id,
-                "source": item.source,
-                "title": item.title,
-                "summary": item.content[:150] if item.content else "",
+                "id": _dget(item, "id", ""),
+                "source": _dget(item, "source", ""),
+                "title": _dget(item, "title", ""),
+                "summary": (_dget(item, "content", "") or "")[:150],
             })
         evidence_json = json.dumps(evidence_items, ensure_ascii=False, indent=2)
 
@@ -75,7 +109,7 @@ class ReviewAgent(BaseAgent[ReviewInput, ReviewOutput]):
         except Exception as e:
             return AgentResult(
                 success=False,
-                error=f"LLM 调用失败: {e}",
+                error={"code": "REVIEW_ERROR", "message": f"LLM 调用失败: {e}"},
             )
 
         # ── Parse JSON ──
@@ -105,13 +139,15 @@ class ReviewAgent(BaseAgent[ReviewInput, ReviewOutput]):
             "actionability": False,
         }
 
-        # Map 7 dimensions to existing check keys
+        # Map review dimensions to existing check keys
         for dim, key in [
             ("completeness", "completeness"),
             ("logic_consistency", "logic"),
             ("evidence_consistency", "sources"),
-            ("writing_quality", "duplication"),
+            ("evidence_quality", "sources"),  # map to same key
+            ("company_relevance", "neutrality"),  # map to neutrality slot
             ("hallucination", "neutrality"),
+            ("writing_quality", "duplication"),
             ("data_quality", "format"),
             ("recommendation_quality", "actionability"),
         ]:
@@ -163,7 +199,16 @@ class ReviewAgent(BaseAgent[ReviewInput, ReviewOutput]):
             issues=issues,
             revision_suggestions=revision_suggestions,
             passed_for_output=passed_for_output,
+            deletion_suggestions=data.get("deletion_suggestions", []),
+            high_issue_count=high_count,
+            fact_audit_passed=(passed_for_output and high_count == 0),
         )
+
+        # Collect deletion suggestions from review
+        deletion_suggestions = data.get("deletion_suggestions", [])
+        # Attach to metadata
+        review_result_dict = review_result.model_dump()
+        review_result_dict["deletion_suggestions"] = deletion_suggestions
 
         output = ReviewOutput(
             review_result=review_result,

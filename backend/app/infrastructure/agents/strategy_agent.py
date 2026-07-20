@@ -23,6 +23,12 @@ from app.infrastructure.llm.client import llm_client
 
 _CONFIDENCE_WEIGHTS = {"high": 1.0, "medium": 0.6, "low": 0.3, "estimated": 0.1}
 
+def _dget(obj, key, default=None):
+    """Safe dict/object access — handles both Pydantic models and plain dicts."""
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
 
 class StrategyAgent(BaseAgent[StrategyInput, StrategyOutput]):
 
@@ -39,17 +45,18 @@ class StrategyAgent(BaseAgent[StrategyInput, StrategyOutput]):
         gap = input_data.gap_analysis
 
         # ── Step 1: Assess evidence quality (rule-based, keeps gate logic) ──
-        evidence_items = eb.evidence_items
+        evidence_items = _dget(eb, "evidence_items", [])
         if not evidence_items:
             return self._need_more("没有收集到任何证据")
         dims = {}
         for e in evidence_items:
-            dims[e.category or "unknown"] = dims.get(e.category or "unknown", 0) + 1
+            cat = _dget(e, "category", "unknown")
+            dims[cat or "unknown"] = dims.get(cat or "unknown", 0) + 1
         dims_enough = sum(1 for v in dims.values() if v >= 2)
         if dims_enough < 2:
             return self._need_more(f"证据覆盖不足，仅 {dims_enough} 个维度有足够数据")
 
-        scores = [_CONFIDENCE_WEIGHTS.get(e.confidence, 0.3) for e in evidence_items]
+        scores = [_CONFIDENCE_WEIGHTS.get(_dget(e, "confidence", "estimated"), 0.3) for e in evidence_items]
         avg_conf = sum(scores) / len(scores)
         if avg_conf < 0.2:
             return self._need_more(f"证据可信度过低 (avg={avg_conf:.0%})")
@@ -59,9 +66,9 @@ class StrategyAgent(BaseAgent[StrategyInput, StrategyOutput]):
 
         # ── Step 3: Build evidence JSON ──
         evidence_json = json.dumps([
-            {"id": e.id, "title": e.title, "source": e.source, "url": e.url,
-             "dimension": e.category, "summary": e.content[:250], "confidence": e.confidence}
-            for e in sorted(evidence_items, key=lambda x: {"high":0,"medium":1,"low":2}.get(x.confidence,3))[:15]
+            {"id": _dget(e, "id", ""), "title": _dget(e, "title", ""), "source": _dget(e, "source", ""), "url": _dget(e, "url", ""),
+             "dimension": _dget(e, "category", ""), "summary": (_dget(e, "content", "") or "")[:250], "confidence": _dget(e, "confidence", "estimated")}
+            for e in sorted(evidence_items, key=lambda x: {"high":0,"medium":1,"low":2}.get(_dget(x, "confidence", "estimated"),3))[:15]
         ], ensure_ascii=False, indent=2)
 
         # ── Step 3.5: Build insights JSON ──
@@ -194,9 +201,13 @@ class StrategyAgent(BaseAgent[StrategyInput, StrategyOutput]):
 
     @staticmethod
     def _summarize_gap(gap) -> str:
-        fm = gap.features.get("feature_matrix", [])
-        gaps = gap.gaps or {}
-        pos = gap.positioning or {}
+        fm = _dget(gap, "features", {})
+        if isinstance(fm, dict):
+            fm = fm.get("feature_matrix", [])
+        else:
+            fm = _dget(fm, "feature_matrix", []) if fm else []
+        gaps = _dget(gap, "gaps", {}) or {}
+        pos = _dget(gap, "positioning", {}) or {}
         caps = gaps.get("capability_gaps", [])
         advs = gaps.get("competitive_advantages", [])
         disadvs = gaps.get("competitive_disadvantages", [])

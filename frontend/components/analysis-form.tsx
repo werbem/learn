@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { createReport } from "@/lib/api";
-import { saveToHistory } from "@/lib/utils";
+import { saveToHistory, generateUUID } from "@/lib/utils";
 import { CUSTOM_OBJECTIVE, OBJECTIVE_OPTIONS } from "@/types";
 import type { AnalysisInput } from "@/types";
 
@@ -34,7 +34,7 @@ export function AnalysisForm() {
     setError(null);
 
     // Generate client-side task ID for immediate navigation
-    const clientTaskId = crypto.randomUUID();
+    const clientTaskId = generateUUID();
 
     // Build the actual API payload
     const payload: AnalysisInput = {

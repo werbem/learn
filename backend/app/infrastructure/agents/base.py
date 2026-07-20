@@ -5,7 +5,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Generic, TypeVar
+from typing import Any, Optional, Generic, TypeVar
 
 from pydantic import BaseModel
 
@@ -24,6 +24,7 @@ class AgentContext:
     current_phase: Phase
     retry_count: int = 0
     started_at: datetime = datetime.now()
+    phase_entered_at: Optional[str] = None
 
 
 @dataclass
@@ -110,7 +111,7 @@ class BaseAgent(ABC, Generic[InputT, OutputT]):
                 trace,
                 success=result.success,
                 output_summary=str(out)[:300],
-                error=result.error.get("message") if result.error else None,
+                error=(result.error.get("message") if isinstance(result.error, dict) else str(result.error)) if result.error else None,
                 metadata={
                     "duration_ms": result.duration_ms,
                     "phase": self.phase.value,

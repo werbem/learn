@@ -5,8 +5,19 @@ import type {
   TaskProgressResponse,
 } from "@/types";
 
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8000";
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "";
 const API_PREFIX = `${API_BASE}/api`;
+
+export class ApiError extends Error {
+  status: number;
+  detail: any;
+  constructor(status: number, detail: any, message?: string) {
+    super(message || `API Error ${status}`);
+    this.name = "ApiError";
+    this.status = status;
+    this.detail = detail;
+  }
+}
 
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
   const res = await fetch(url, {
@@ -18,7 +29,13 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
   });
   if (!res.ok) {
     const body = await res.text();
-    throw new Error(`API Error ${res.status}: ${body}`);
+    let detail: any = body;
+    try {
+      detail = JSON.parse(body);
+    } catch {
+      // keep as string if not JSON
+    }
+    throw new ApiError(res.status, detail, `API Error ${res.status}: ${typeof detail === "string" ? detail : JSON.stringify(detail)}`);
   }
   return res.json();
 }

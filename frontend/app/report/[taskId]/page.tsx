@@ -128,6 +128,33 @@ export default function ReportPage({
         </div>
       </div>
 
+      {/* Show error banner if report failed */}
+      {(report.status === "failed" || report.error) && (
+        <Card className="border-destructive/40 bg-destructive/5">
+          <CardContent className="p-4 space-y-3">
+            <div className="flex items-center gap-2">
+              <span className="text-lg">❌</span>
+              <h3 className="font-semibold text-destructive">报告生成失败</h3>
+            </div>
+            <div className="bg-destructive/10 rounded-lg p-3">
+              <p className="text-sm font-mono break-all">{report.error || "未知错误"}</p>
+            </div>
+            {report.diagnosis && (
+              <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-sm border-t border-destructive/20 pt-3 mt-1">
+                <div className="text-muted-foreground">失败环节</div>
+                <div>{report.diagnosis.failed_stage || report.diagnosis.failed_agent || "—"}</div>
+                <div className="text-muted-foreground">错误类型</div>
+                <div className="font-mono text-xs">{report.diagnosis.error_type || "—"}</div>
+                <div className="text-muted-foreground">根因</div>
+                <div className="text-xs">{report.diagnosis.root_cause || "—"}</div>
+                <div className="text-muted-foreground">建议</div>
+                <div className="text-xs">{report.diagnosis.suggestion || "—"}</div>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
       {/* Report header */}
       <Card>
         <CardContent className="p-6">
@@ -150,6 +177,13 @@ export default function ReportPage({
               <div className="font-medium">{report.total_word_count?.toLocaleString() || "—"}</div>
             </div>
           </div>
+
+          {/* Warning if no sections/content */}
+          {(!report.sections || report.sections.length === 0) && !report.markdown && report.status !== "failed" && (
+            <div className="mt-4 p-3 bg-yellow-50 dark:bg-yellow-950/30 border border-yellow-200 dark:border-yellow-800 rounded-lg text-sm text-yellow-700 dark:text-yellow-400">
+              报告内容为空，可能分析未完成或生成过程出现异常。请尝试重新生成。
+            </div>
+          )}
 
           {/* Sections list */}
           {report.sections && report.sections.length > 0 && (

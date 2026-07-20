@@ -22,6 +22,7 @@ from app.application.dto.agent_dto import (
 from app.infrastructure.agents.base import AgentContext
 from app.infrastructure.agents.compare_agent import CompareAgent
 from app.infrastructure.agents.insight_agent import InsightAgent
+from app.utils.state_reader import get_validated_input
 from app.infrastructure.agents.gate_agent import GateAgent
 from app.infrastructure.agents.planner_agent import PlannerAgent
 from app.infrastructure.agents.report_agent import ReportAgent
@@ -77,8 +78,12 @@ async def validate_input_node(state: WorkflowState) -> dict[str, Any]:
     result = await agent.aexecute(ctx, GateInput(user_input=state.get("user_input", {})))
     if result.success:
         _emit("gate", "completed", state)
+        validated = result.output.validated_input
         return {
-            "validated_input": result.output.model_dump(),
+            "validated_input": {
+                "is_valid": validated.is_valid,
+                **validated.clean_values,
+            },
             "current_phase": result.output.current_phase,
             "phase_history": _push_phase(state, result.phase_record),
             "updated_at": datetime.utcnow().isoformat(),
@@ -96,7 +101,7 @@ async def plan_node(state: WorkflowState) -> dict[str, Any]:
     _emit("planner", "running", state)
 
     ctx = _make_ctx(state, "planner")
-    vi = state.get("validated_input", {}).get("clean_values", {})
+    vi = get_validated_input(state)
     agent = PlannerAgent()
     result = await agent.aexecute(
         ctx,
@@ -134,9 +139,9 @@ async def research_node(state: WorkflowState) -> dict[str, Any]:
         ctx,
         ResearchInput(
             research_plan=state.get("research_plan", {}),
-            our_company=state.get("validated_input", {}).get("clean_values", {}).get("our_company", ""),
-            competitor_company=state.get("validated_input", {}).get("clean_values", {}).get("competitor_company", ""),
-            product=state.get("validated_input", {}).get("clean_values", {}).get("product", ""),
+            our_company=get_validated_input(state).get("our_company", ""),
+            competitor_company=get_validated_input(state).get("competitor_company", ""),
+            product=get_validated_input(state).get("product", ""),
         ),
     )
     if result.success:
@@ -183,7 +188,7 @@ async def compare_node(state: WorkflowState) -> dict[str, Any]:
     _emit("compare", "running", state)
 
     ctx = _make_ctx(state, "compare")
-    vi = state.get("validated_input", {}).get("clean_values", {})
+    vi = get_validated_input(state)
     objective = vi.get("objective", "")
 
     # ── Evidence Clustering (NEW) ──
@@ -252,7 +257,7 @@ async def insight_node(state: WorkflowState) -> dict[str, Any]:
     _emit("insight", "running", state)
 
     ctx = _make_ctx(state, "insight")
-    vi = state.get("validated_input", {}).get("clean_values", {})
+    vi = get_validated_input(state)
     agent = InsightAgent()
     result = await agent.aexecute(
         ctx,
@@ -289,7 +294,7 @@ async def strategy_node(state: WorkflowState) -> dict[str, Any]:
     _emit("strategy", "running", state)
 
     ctx = _make_ctx(state, "strategy")
-    vi = state.get("validated_input", {}).get("clean_values", {})
+    vi = get_validated_input(state)
     agent = StrategyAgent()
     result = await agent.aexecute(
         ctx,
@@ -329,7 +334,7 @@ async def report_node(state: WorkflowState) -> dict[str, Any]:
     _emit("report", "running", state)
 
     ctx = _make_ctx(state, "report")
-    vi = state.get("validated_input", {}).get("clean_values", {})
+    vi = get_validated_input(state)
     agent = ReportAgent()
     result = await agent.aexecute(
         ctx,
@@ -357,7 +362,11 @@ async def report_node(state: WorkflowState) -> dict[str, Any]:
             "updated_at": datetime.utcnow().isoformat(),
         }
     return {
-        "report_document": {"markdown": "", "html": "", "sections": []},
+        "report_document": {
+            "formats": {"markdown": "", "html": "", "docx_url": None},
+            "sections": [],
+            "metadata": {"total_word_count": 0},
+        },
         "current_phase": "failed",
         "errors": list(state.get("errors", [])) + [result.error],
         "phase_history": _push_phase(state, result.phase_record),
@@ -371,7 +380,7 @@ async def review_node(state: WorkflowState) -> dict[str, Any]:
 
     ctx = _make_ctx(state, "review")
     agent = ReviewAgent()
-    vi = state.get("validated_input", {}).get("clean_values", {})
+    vi = get_validated_input(state)
     # Safely construct ReviewInput — report_document may be empty if report_node failed
     try:
         review_input = ReviewInput(
@@ -395,7 +404,7 @@ async def review_node(state: WorkflowState) -> dict[str, Any]:
         passed = result.output.passed_for_output
         _emit("review", "completed", state, extra={"passed": passed})
         return {
-            "review_result": result.output.review_result.model_dump(),
+            "review_result": {**result.output.review_result.model_dump(), "deletion_suggestions": result.output.review_result.deletion_suggestions, "high_issue_count": result.output.review_result.high_issue_count, "fact_audit_passed": result.output.review_result.fact_audit_passed},
             "current_phase": "reviewed" if passed else "review_failed",
             "retry_counts": {**state.get("retry_counts", {}), "report_retry": state.get("retry_counts", {}).get("report_retry", 0) + (0 if passed else 1)},
             "progress": 95.0,
@@ -421,14 +430,41 @@ async def fail_node(state: WorkflowState) -> dict[str, Any]:
 
 
 async def finalize_node(state: WorkflowState) -> dict[str, Any]:
-    """Terminal node for success — mark complete."""
+    """Terminal node for success — mark complete with fact-audit summary."""
     from app.infrastructure.workflow.stream import push_done
-    push_done(_tid(state), status="completed")
+
+    # ── Fact-audit summary ──
+    review = state.get("review_result", {})
+    if review:
+        high_issues = review.get("high_count", 0) or sum(
+            1 for i in review.get("issues", []) if isinstance(i, dict) and i.get("severity") == "HIGH"
+        )
+        deletion_suggestions = review.get("deletion_suggestions", [])
+    else:
+        high_issues = 0
+        deletion_suggestions = []
+
+    push_done(
+        _tid(state),
+        status="completed",
+        extra={
+            "fact_audit": {
+                "high_issues": high_issues,
+                "deletion_suggestions_count": len(deletion_suggestions),
+                "passed": high_issues == 0,
+            }
+        },
+    )
 
     return {
         "current_phase": "completed",
         "progress": 100.0,
         "updated_at": datetime.utcnow().isoformat(),
+        "fact_audit_result": {
+            "high_issues": high_issues,
+            "deletion_suggestions": deletion_suggestions,
+            "passed": high_issues == 0,
+        },
     }
 
 

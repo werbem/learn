@@ -28,7 +28,22 @@ export interface TaskProgressResponse {
   progress: number;
   phase_history: PhaseRecord[];
   error_info?: string | null;
+  diagnosis?: DiagnosisInfo | null;
   created_at: string;
+}
+
+
+export interface DiagnosisInfo {
+  task_id?: string;
+  failed_stage?: string;
+  failed_agent?: string;
+  error_type?: string;
+  root_cause?: string;
+  suggestion?: string;
+  retry_available?: boolean;
+  error_code?: string;
+  error_message?: string;
+  timestamp?: string;
 }
 
 export interface ReportSectionDTO {
@@ -51,6 +66,9 @@ export interface ReportDetailResponse {
   sections: ReportSectionDTO[];
   total_word_count: number;
   generated_at: string | null;
+  status?: string | null;
+  error?: string | null;
+  diagnosis?: DiagnosisInfo | null;
   created_at: string;
 }
 

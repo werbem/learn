@@ -137,8 +137,10 @@ class PlannerAgent(BaseAgent[PlannerInput, PlannerOutput]):
     ) -> ResearchPlan:
         """Map LLM structured output → ResearchPlan with individual ResearchTasks."""
         base_keywords = [
+            input_data.our_company,
             input_data.competitor_company,
             input_data.product,
+            f"{input_data.our_company} {input_data.product}",
             f"{input_data.competitor_company} {input_data.product}",
         ]
         # Add LLM-generated keywords
@@ -196,28 +198,28 @@ class PlannerAgent(BaseAgent[PlannerInput, PlannerOutput]):
                 ResearchTask(
                     task_id="task_web_001",
                     source_type="web",
-                    keywords=[input_data.competitor_company, input_data.product],
+                    keywords=[input_data.our_company, input_data.competitor_company, input_data.product],
                     priority=5,
                     dependencies=[],
                 ),
                 ResearchTask(
                     task_id="task_as_001",
                     source_type="app_store",
-                    keywords=[input_data.product],
+                    keywords=[input_data.our_company, input_data.product],
                     priority=3,
                     dependencies=[],
                 ),
                 ResearchTask(
                     task_id="task_social_001",
                     source_type="social",
-                    keywords=[input_data.competitor_company],
+                    keywords=[input_data.our_company, input_data.competitor_company],
                     priority=3,
                     dependencies=[],
                 ),
                 ResearchTask(
                     task_id="task_ai_001",
                     source_type="ai_search",
-                    keywords=[f"{input_data.competitor_company} {input_data.product} 竞品分析"],
+                    keywords=[f"{input_data.our_company} {input_data.competitor_company} {input_data.product} 竞品分析"],
                     priority=4,
                     dependencies=[],
                 ),

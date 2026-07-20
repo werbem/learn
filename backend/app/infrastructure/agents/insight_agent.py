@@ -35,7 +35,7 @@ class InsightAgent(BaseAgent[InsightInput, InsightOutput]):
 
     @property
     def phase(self) -> Phase:
-        return Phase.STRATEGIZING  # reuse strategizing phase
+        return Phase.INSIGHTING
 
     async def arun(self, ctx: AgentContext, input_data: InsightInput) -> AgentResult:
         clusters = input_data.evidence_clusters or []

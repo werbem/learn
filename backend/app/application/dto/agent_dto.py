@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Any, Optional
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 # ── User Input ──
@@ -136,11 +136,11 @@ class ResearchInput(BaseModel):
     research_plan: Optional[dict] = None
     our_company: str = ""
     competitor_company: str = ""
-    product: str = 
+    product: str = ""
 
 
 class ResearchOutput(BaseModel):
-    evidence_bundle: dict
+    evidence_bundle: EvidenceBundleDTO
     quality_report: QualityReport
 
 
@@ -213,11 +213,11 @@ class CompareInput(BaseModel):
     objective: str = ""
     our_company: str = ""
     competitor_company: str = ""
-    product: str = 
+    product: str = ""
 
 
 class CompareOutput(BaseModel):
-    gap_analysis: dict
+    gap_analysis: GapAnalysis
     dimensions_analyzed: list[str] = Field(default_factory=list)
     dimensions_skipped: list[str] = Field(default_factory=list)
     evidence_references_count: int = 0
@@ -245,6 +245,13 @@ class OpportunityItem(BaseModel):
     impact: str = "medium"
     effort: str = "medium"
     alignment_with_objective: str = Field(default="medium")
+
+    @field_validator('alignment_with_objective', mode='before')
+    @classmethod
+    def _coerce_awo(cls, v):
+        if isinstance(v, int):
+            return str(v)
+        return v
     evidence_refs: list[str] = Field(default_factory=list)
     confidence: str = "medium"
 
@@ -290,11 +297,11 @@ class StrategyInput(BaseModel):
     evidence_bundle: dict = Field(default_factory=dict)
     insights: Optional[list[dict]] = None
     objective: str = ""
-    product: str = 
+    product: str = ""
 
 
 class StrategyOutput(BaseModel):
-    strategic_insights: dict
+    strategic_insights: StrategicInsights
     confidence_summary: dict = Field(default_factory=lambda: {
         "overall": "medium", "weaknesses": [], "data_gaps": [],
     })
@@ -337,11 +344,11 @@ class ReportInput(BaseModel):
     objective: str = ""
     product: str = ""
     our_company: str = ""
-    competitor_company: str = 
+    competitor_company: str = ""
 
 
 class ReportOutput(BaseModel):
-    report_document: dict
+    report_document: ReportDocument
 
 
 # ── Review Agent I/O ──
@@ -369,6 +376,9 @@ class ReviewResult(BaseModel):
     issues: list[ReviewIssue] = Field(default_factory=list)
     revision_suggestions: list[dict] = Field(default_factory=list)
     passed_for_output: bool = False
+    deletion_suggestions: list[dict] = Field(default_factory=list)
+    high_issue_count: int = 0
+    fact_audit_passed: bool = False
 
 
 class ReviewInput(BaseModel):

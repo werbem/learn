@@ -15,6 +15,12 @@ from app.infrastructure.agents.compare_prompt import (
 )
 from app.infrastructure.llm.client import llm_client
 
+def _dget(obj, key, default=None):
+    """Safe dict/object access — handles both Pydantic models and plain dicts."""
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
 
 class CompareAgent(BaseAgent[CompareInput, CompareOutput]):
 
@@ -27,9 +33,12 @@ class CompareAgent(BaseAgent[CompareInput, CompareOutput]):
         return Phase.COMPARING
 
     async def arun(self, ctx: AgentContext, input_data: CompareInput) -> AgentResult:
+        # ── Dict-safe extraction of evidence items ──
+        eb = input_data.evidence_bundle
+        raw_items = _dget(eb, "evidence_items", [])
         evidence_items = sorted(
-            input_data.evidence_bundle.evidence_items,
-            key=lambda e: {"high": 0, "medium": 1, "low": 2, "estimated": 3}.get(e.confidence, 3),
+            raw_items,
+            key=lambda e: {"high": 0, "medium": 1, "low": 2, "estimated": 3}.get(_dget(e, "confidence", "estimated"), 3),
         )[:12]
 
         clusters = input_data.evidence_clusters or []
@@ -41,9 +50,9 @@ class CompareAgent(BaseAgent[CompareInput, CompareOutput]):
             ), phase_record={"phase": Phase.COMPARING.value, "status": "no_evidence"})
 
         evidence_json = json.dumps([
-            {"id": e.id, "title": e.title, "source": e.source, "url": e.url,
-             "date": e.date, "dimension": e.category, "summary": e.content[:300],
-             "confidence": e.confidence}
+            {"id": _dget(e, "id", ""), "title": _dget(e, "title", ""), "source": _dget(e, "source", ""), "url": _dget(e, "url", ""),
+             "date": _dget(e, "date", ""), "dimension": _dget(e, "category", ""), "summary": (_dget(e, "content", "") or "")[:300],
+             "confidence": _dget(e, "confidence", "estimated")}
             for e in evidence_items
         ], ensure_ascii=False, indent=2)
 

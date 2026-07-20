@@ -61,3 +61,18 @@ export function removeFromHistory(taskId: string) {
   const filtered = history.filter((h: { taskId: string }) => h.taskId !== taskId);
   localStorage.setItem(key, JSON.stringify(filtered));
 }
+
+export function generateUUID(): string {
+  // Use native crypto.randomUUID if available (browser & Node 19+)
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  // Fallback: UUID v4 using crypto.getRandomValues or Math.random
+  const getRandomValues = (typeof crypto !== "undefined" && typeof crypto.getRandomValues === "function")
+    ? () => crypto.getRandomValues(new Uint8Array(1))[0]
+    : () => Math.floor(Math.random() * 256);
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+    const r = (getRandomValues() & 0x0f) | (c === "x" ? 0 : 0x40);
+    return (c === "x" ? r : (r & 0x3f) | 0x80).toString(16);
+  });
+}
