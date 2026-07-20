@@ -85,9 +85,8 @@
 ```
 
 ## 📸 Demo 截图
+<img width="1440" height="706" alt="image" src="https://github.com/user-attachments/assets/c73fdd9e-e4b2-4c5f-849e-5061b3036e66" />
 
-<!-- 启动后访问 http://localhost:3000 截图并放置到此处 -->
-> 📝 *截图占位：将实际截图替换 `docs/screenshots/` 目录下的文件*
 
 | 首页 Hero | 分析进度 | 分析报告 |
 |-----------|----------|----------|
@@ -96,7 +95,7 @@
 ## 🚀 在线 Demo
 
 <!-- 部署后更新此地址 -->
-> 在线 Demo 地址：[https://your-demo-url.com](https://your-demo-url.com)
+> 在线 Demo 地址：https://tackle-ungreased-defy.ngrok-free.dev
 
 **本地体验：**
 
