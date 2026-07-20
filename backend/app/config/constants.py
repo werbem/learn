@@ -2,6 +2,15 @@
 
 from __future__ import annotations
 
+import os
+
+# ── Demo mode default ──
+# Set DEMO_MODE=true (env) to run with pre-built demo data when no API keys configured.
+# Default: true when OPENAI_API_KEY is not set (safe for public showcase)
+DEMO_MODE_DEFAULT: bool = (
+    os.getenv('DEMO_MODE', 'true' if not os.getenv('OPENAI_API_KEY') else 'false').lower() == 'true'
+)
+
 from enum import Enum
 
 

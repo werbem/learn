@@ -20,15 +20,24 @@ interface ProgressTrackerProps {
   completedSteps: string[];
   phaseHistory: PhaseRecord[];
   progress: number;
+  demoMode?: boolean;
 }
 
-export function ProgressTracker({ activeStep, completedSteps, phaseHistory, progress }: ProgressTrackerProps) {
+export function ProgressTracker({ activeStep, completedSteps, phaseHistory, progress, demoMode }: ProgressTrackerProps) {
   // Determine which step is currently "active" (running)
   // activeStep comes directly from SSE "running" events
   // If empty and no completed steps, first step is pending
 
   return (
     <div className="w-full max-w-2xl mx-auto space-y-6">
+      {demoMode && (
+        <div className="flex items-center justify-center gap-2 py-2 px-4 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-600 dark:text-amber-400 text-sm">
+          <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M12 2L2 7l10 5 10-5-10-5z" /><path d="M2 17l10 5 10-5" /><path d="M2 12l10 5 10-5" />
+          </svg>
+          <span className="font-medium">Demo 模式</span> — 固定案例 &quot;抖音 vs 快手&quot;，非真实 AI 分析
+        </div>
+      )}
       {/* Progress bar — phase-based, smooth */}
       <div className="space-y-2">
         <div className="flex justify-between text-sm text-muted-foreground">
@@ -51,7 +60,7 @@ export function ProgressTracker({ activeStep, completedSteps, phaseHistory, prog
       <div className="space-y-2">
         {STEPS.map((step, idx) => {
           const phase = phaseHistory.find((p) => p.phase === step);
-          const isCompleted = completedSteps.includes(step) || step === "completed";
+          const isCompleted = completedSteps.includes(step);
           const isActive = activeStep === step && !isCompleted;
           const isFailed = phase?.status === "failed";
           const label = PHASE_LABELS[step] || step;

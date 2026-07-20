@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -9,15 +9,31 @@ import { saveToHistory, generateUUID } from "@/lib/utils";
 import { CUSTOM_OBJECTIVE, OBJECTIVE_OPTIONS } from "@/types";
 import type { AnalysisInput } from "@/types";
 
-export function AnalysisForm() {
+interface AnalysisFormProps {
+  initialValues?: Partial<AnalysisInput>;
+}
+
+export function AnalysisForm({ initialValues }: AnalysisFormProps = {}) {
   const router = useRouter();
   const [error, setError] = useState<string | null>(null);
   const [form, setForm] = useState<AnalysisInput & { customObjective?: string }>({
-    our_company: "",
-    competitor_company: "",
-    product: "",
-    objective: "go_to_market",
+    our_company: initialValues?.our_company || "",
+    competitor_company: initialValues?.competitor_company || "",
+    product: initialValues?.product || "",
+    objective: initialValues?.objective || "go_to_market",
   });
+
+  useEffect(() => {
+    if (initialValues) {
+      setForm(prev => ({
+        ...prev,
+        our_company: initialValues.our_company || prev.our_company,
+        competitor_company: initialValues.competitor_company || prev.competitor_company,
+        product: initialValues.product || prev.product,
+        objective: initialValues.objective || prev.objective,
+      }));
+    }
+  }, [initialValues?.our_company, initialValues?.competitor_company, initialValues?.product, initialValues?.objective]);
 
   const isObjectiveCustom = form.objective === CUSTOM_OBJECTIVE;
 

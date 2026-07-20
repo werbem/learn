@@ -105,10 +105,41 @@ async def create_report(body: ReportCreateRequest) -> ReportCreateResponse:
             )
             # ---
             final_state = state
+            # Phase tracking — accumulate phase_history from node outputs
+            _phase_history = []
+            _phase_node_map = {
+                "validate_input_node": "validated",
+                "plan_node": "planned",
+                "research_node": "researched",
+                "compare_node": "compared",
+                "insight_node": "insighted",
+                "strategy_node": "strategized",
+                "report_node": "reported",
+                "review_node": "reviewed",
+            }
             async for chunk in workflow_graph.astream(state, stream_mode="updates"):
-                # chunk is a dict like {"validate_input_node": {...}} or {"plan_node": {...}}
                 for node_name, node_state in chunk.items():
                     final_state.update(node_state)
+                    # Track phase progress
+                    phase_name = _phase_node_map.get(node_name)
+                    if phase_name:
+                        now = datetime.utcnow().isoformat()
+                        _phase_history.append({
+                            "phase": phase_name,
+                            "entered_at": now,
+                            "duration_ms": 0,
+                            "status": "completed",
+                        })
+                        final_state["phase_history"] = list(_phase_history)
+                    # Update progress based on phase
+                    phase_progress_map = {
+                        "validated": 5, "planned": 15, "researched": 40,
+                        "compared": 55, "insighted": 60, "strategized": 65,
+                        "reported": 85, "reviewed": 95,
+                    }
+                    if phase_name:
+                        final_state["progress"] = float(phase_progress_map.get(phase_name, 0))
+                        final_state["current_agent"] = phase_name
                     _tasks[task_id_str]["state"] = dict(final_state)
             final_phase = final_state.get("current_phase", "")
             if "fail" in final_phase or final_phase == "validation_failed":
@@ -241,23 +272,54 @@ async def get_report(task_id: UUID) -> ReportDetailResponse:
 
 @router.get("/{task_id}/download")
 async def download_report(task_id: UUID):
-    """Download the Word report file by task ID."""
-    from fastapi.responses import FileResponse
-    import os
+    """Download the Word report — generate DOCX from markdown on-the-fly."""
+    from fastapi.responses import StreamingResponse
+    from io import BytesIO
+    from docx import Document
 
     report = _reports.get(str(task_id))
     if not report:
         raise HTTPException(status_code=404, detail="报告不存在")
 
-    word_url = report.get("word_url")
-    if not word_url or not os.path.exists(word_url):
+    markdown = report.get("markdown", "")
+    if not markdown:
         raise HTTPException(status_code=404, detail="Word文件不存在或尚未生成")
 
-    filename = os.path.basename(word_url)
-    return FileResponse(
-        path=word_url,
-        filename=filename,
+    # Generate DOCX from markdown using python-docx
+    try:
+        doc = Document()
+        # Use default font
+        for line in markdown.split("\n"):
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith("# "):
+                doc.add_heading(line[2:], level=1)
+            elif line.startswith("## "):
+                doc.add_heading(line[3:], level=2)
+            elif line.startswith("### "):
+                doc.add_heading(line[4:], level=3)
+            elif line.startswith("- ") or line.startswith("* "):
+                doc.add_paragraph(line[2:], style="List Bullet")
+            elif line.startswith("|"):
+                continue  # Skip tables for now
+            elif line == "---":
+                doc.add_paragraph("_" * 40)
+            else:
+                doc.add_paragraph(line)
+        buf = BytesIO()
+        doc.save(buf)
+        docx_bytes = buf.getvalue()
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Word文件生成失败: {e}")
+
+    filename = f"竞品分析报告_{task_id[:8]}.docx"
+    return StreamingResponse(
+        BytesIO(docx_bytes),
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
     )
 
 

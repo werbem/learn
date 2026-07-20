@@ -79,6 +79,7 @@ export interface HistoryEntry {
   product: string;
   objective: string;
   createdAt: string;
+  demo?: boolean;
 }
 
 export const OBJECTIVE_LABELS: Record<string, string> = {

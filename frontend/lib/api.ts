@@ -5,7 +5,9 @@ import type {
   TaskProgressResponse,
 } from "@/types";
 
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "";
+// 浏览器端使用相对路径（默认），由 Next.js rewrite 代理到后端
+// 如需直连后端（如内网穿透不同端口），设置 NEXT_PUBLIC_API_URL
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || "";
 const API_PREFIX = `${API_BASE}/api`;
 
 export class ApiError extends Error {

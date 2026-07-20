@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import sys
 
 from contextlib import asynccontextmanager
@@ -65,19 +66,11 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
-    # CORS
+    # CORS — 从环境变量读取前端地址，开发环境默认 localhost:3000
+    frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
-
-    # Routes
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
+        allow_origins=[frontend_url],
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],

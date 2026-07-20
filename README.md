@@ -1,176 +1,156 @@
-# AI 竞品分析助手
+# 🤖 AI 竞品情报分析助手
 
-> 基于 AI Agent 的互联网产品竞品分析报告自动生成系统
+> 基于 LLM Agent + RAG 的智能竞品研究系统，输入目标公司和产品，AI 自动完成全网情报收集、多维度对比分析和战略洞察报告生成。
 
-## 项目概述
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Python 3.12+](https://img.shields.io/badge/Python-3.12+-green.svg)](https://www.python.org/)
+[![Next.js 15](https://img.shields.io/badge/Next.js-15-black.svg)](https://nextjs.org/)
 
-AI 竞品分析助手是一款智能化竞品分析工具。用户输入我方公司、竞品公司、分析产品和分析目标后，系统通过 **多个 AI Agent 协同工作**，自动执行以下流程：
+---
 
-1. **Gate Agent** — 输入验证与清洗
-2. **Planner Agent** — 生成研究计划
-3. **Research Agent** — 多源证据采集（官网、新闻、App Store、社交等）
-4. **Compare Agent** — 竞品维度对比与差距分析
-5. **Strategy Agent** — SWOT 分析、战略建议、路线图
-6. **Report Agent** — 生成 Markdown / HTML / Word 格式报告
-7. **Review Agent** — 质量审查与反馈
+## 📖 项目背景
 
-## 技术栈
+在互联网产品竞争中，竞品分析是战略决策的核心输入。但传统的竞品分析依赖人工搜索、整理、对比，耗时数天甚至数周。
 
-| 层 | 技术 |
-|---|---|
-| **后端** | Python 3.13+, FastAPI, LangGraph, Pydantic, SQLAlchemy |
-| **前端** | React 19, Next.js 15, TypeScript, Tailwind CSS 4, Shadcn UI |
-| **工作流引擎** | LangGraph StateGraph |
-| **数据库** | SQLite (开发) / PostgreSQL (生产) |
-| **容器化** | Docker + Docker Compose |
+**AI 竞品情报分析助手** 将这一流程自动化：只需输入目标公司和竞品信息，AI Agent 团队会自动拆解研究任务、从多渠道搜集情报、交叉验证证据可信度、生成包含 SWOT 分析和战略建议的专业报告。
 
-## 项目结构
+## 🎯 解决的问题
+
+| 痛点 | 传统方式 | 本产品 |
+|------|----------|--------|
+| 信息搜集耗时 | 人工搜索数天 | Agent 自动搜索，分钟级完成 |
+| 数据源单一 | 依赖搜索引擎 | 7 个数据源并行采集 |
+| 证据可信度不明 | 主观判断 | 每条结论标注验证等级 |
+| 报告格式不统一 | 手动排版 | Markdown/HTML/DOCX 标准化输出 |
+| 缺乏战略洞察 | 数据罗列 | SWOT 分析 + 优先级建议 |
+
+## ✨ 产品能力
+
+- **🏢 企业实体识别** — 自动关联企业信息、品牌名称和产品线
+- **🧩 多 Agent 任务拆解** — Strategy → Research → Insight → Compare → Report → Review 六步协作管线
+- **🌐 多渠道 Web 检索** — 集成 Tavily 搜索引擎，覆盖 App Store / 新闻 / 社区 / GitHub 等数据源
+- **🔍 Evidence 证据校验** — 每条分析结论标注可信度（Verified / Likely / Estimated），事实审计确保报告可信
+- **📊 自动生成分析报告** — Markdown / HTML / DOCX 多格式导出，含 SWOT 分析和 P0 优先级建议
+
+## 🏗 系统架构
 
 ```
-competitive-analysis/
-├── backend/                  # Python FastAPI 后端
-│   ├── app/
-│   │   ├── application/      # 应用层：DTO、服务接口
-│   │   ├── config/           # 配置：Settings、Constants
-│   │   ├── domain/           # 领域层：实体、领域服务
-│   │   ├── infrastructure/   # 基础设施：Agent、LLM、Tool、Workflow、Persistence
-│   │   └── interfaces/       # 接口层：API 路由、Schema
-│   ├── tests/                # 测试
-│   └── Dockerfile
-├── frontend/                 # Next.js 前端
-│   ├── app/                  # 页面路由
-│   │   ├── page.tsx          # 首页 — 分析表单
-│   │   ├── analysis/[id]/    # 分析过程页
-│   │   └── report/[id]/      # 报告展示页
-│   ├── components/           # UI 组件
-│   ├── lib/                  # API 客户端、工具函数
-│   └── types/                # TypeScript 类型定义
-├── outputs/                  # 架构设计文档
-├── data/                     # 运行时数据
-├── docker-compose.yml        # Docker 编排
-├── Makefile                  # 常用命令
-├── start.sh                  # 一键启动脚本
-└── README.md
+┌──────────────────────────────────────────────────────┐
+│                   Browser (http://localhost:3000)     │
+└──────────┬────────────────────────────────┬──────────┘
+           │                                │
+    ┌──────▼──────┐                  ┌─────▼───────┐
+    │  Frontend   │   Proxy /api/*   │   Backend   │
+    │  Next.js 15 │ ◄──────────────► │   FastAPI   │
+    │  Port 3000  │                  │   Port 8000 │
+    └─────────────┘                  └──────┬──────┘
+                                           │
+         ┌─────────────────────────────────┼──────────────┐
+         │                                 │              │
+  ┌──────▼──────┐   ┌───────────┐  ┌──────▼─────┐  ┌─────▼──────┐
+  │  DeepSeek /  │   │  Tavily   │  │  SQLite    │  │  File      │
+  │  OpenAI LLM  │   │  Search   │  │  (data/)    │  │  Store     │
+  └──────────────┘   └───────────┘  └────────────┘  └────────────┘
 ```
 
-## 快速开始
+## 🔄 Agent 分析流程
 
-### 前置条件
+```
+用户输入 (公司/产品/目标)
+    │
+    ▼
+┌──────────────┐
+│ ① Strategy   │  拆解研究任务，制定分析计划
+└──────┬───────┘
+       ▼
+┌──────────────┐
+│ ② Research   │  多渠道搜索 (Web/AppStore/GitHub/News/社区)
+└──────┬───────┘
+       ▼
+┌──────────────┐
+│ ③ Insight    │  证据提取、交叉验证、置信度标注
+└──────┬───────┘
+       ▼
+┌──────────────┐
+│ ④ Compare    │  多维度对比分析 (功能/UX/商业/技术/增长)
+└──────┬───────┘
+       ▼
+┌──────────────┐
+│ ⑤ Report     │  生成结构化报告 (Markdown + HTML + DOCX)
+└──────┬───────┘
+       ▼
+┌──────────────┐
+│ ⑥ Review     │  事实审计 — 检查每条结论的证据支撑
+└──────────────┘
+```
 
-- **Python** 3.12+
-- **Node.js** 22+
-- **pnpm** (corepack enabled)
+## 📸 Demo 截图
+
+<!-- 启动后访问 http://localhost:3000 截图并放置到此处 -->
+> 📝 *截图占位：将实际截图替换 `docs/screenshots/` 目录下的文件*
+
+| 首页 Hero | 分析进度 | 分析报告 |
+|-----------|----------|----------|
+| ![hero](docs/screenshots/hero.png) | ![progress](docs/screenshots/progress.png) | ![report](docs/screenshots/report.png) |
+
+## 🚀 在线 Demo
+
+<!-- 部署后更新此地址 -->
+> 在线 Demo 地址：[https://your-demo-url.com](https://your-demo-url.com)
+
+**本地体验：**
 
 ```bash
-# 启用 corepack（用于 pnpm）
-corepack enable
-```
+# 1. 克隆项目
+git clone https://github.com/werbem/learn.git
+cd learn
 
-### 本地开发
+# 2. 配置环境变量
+cp .env.example .env
+# 编辑 .env，填入 OPENAI_API_KEY (可选) 和 TAVILY_API_KEY (可选)
+# 无 API Key 时自动运行 Demo 模式，展示抖音 vs 快手固定案例
 
-**方式 1：一键启动（推荐）**
-```bash
-chmod +x start.sh
-./start.sh
-```
-
-**方式 2：分别启动**
-
-终端 1 — 后端：
-```bash
-cd backend
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
-```
-
-终端 2 — 前端：
-```bash
-cd frontend
-pnpm install
-pnpm dev
-```
-
-**方式 3：Makefile**
-```bash
-make install    # 安装所有依赖
-make dev        # 同时启动前后端
-```
-
-### 访问
-
-- **前端**: http://localhost:3000
-- **后端 API**: http://localhost:8000/api
-- **API 文档**: http://localhost:8000/docs
-
-## 使用流程
-
-1. 打开首页 `http://localhost:3000`
-2. 填写"我方公司"、"竞品公司"、"分析产品"和"分析目标"
-3. 点击"开始分析"，进入分析过程页面
-4. 等待 AI Agent 完成 7 个阶段的自动分析
-5. 查看生成的竞品分析报告（支持 Markdown / HTML / Word 格式）
-
-## API 端点
-
-| 方法 | 路径 | 说明 |
-|---|---|---|
-| `POST` | `/api/reports` | 创建竞品分析任务 |
-| `GET` | `/api/reports/{taskId}` | 获取分析报告 |
-| `GET` | `/api/reports` | 列出所有报告 |
-| `GET` | `/api/tasks/{taskId}/progress` | 获取任务进度 |
-| `PATCH` | `/api/tasks/{taskId}/decision` | 人工决策（HITL） |
-| `GET` | `/api/health` | 健康检查 |
-
-## Agent 工作流
-
-```
-用户输入 → Gate(验证) → Planner(计划) → Research(采集)
-    → Compare(对比) → Strategy(分析) → Report(生成)
-    → Review(审查) → Finalize(产出)
-                              ↓
-                    Need More Research?
-                              ↓
-                    返回用户补充信息
-```
-
-每个 Agent 的详细设计见 `outputs/` 目录。
-
-## Docker 部署
-
-```bash
-# 构建并启动
+# 3. 启动服务
 docker compose up --build -d
 
-# 查看日志
-docker compose logs -f
-
-# 停止
-docker compose down
+# 4. 访问
+open http://localhost:3000
 ```
 
-## LLM 配置
+## 🔧 技术亮点
 
-默认使用 Mock Provider（返回模拟数据）。要连接真实 LLM：
+| 技术 | 用途 |
+|------|------|
+| **LangGraph** | 多 Agent 工作流编排，支持流式输出和 Human-in-the-Loop |
+| **FastAPI + SSE** | 后端异步处理 + 实时进度推送 |
+| **Pydantic Structured Output** | LLM 输出强制结构校验，杜绝幻觉格式 |
+| **Evidence 管线** | 来源路由 → 选择 → 评估 → 聚类，四级证据处理 |
+| **Trace 可追溯性** | 每次 LLM 调用全链路记录，支持诊断复盘 |
+| **Demo 零配置模式** | 无 API Key 时自动回退到固定案例展示 |
+| **Docker Compose** | 一键部署，前后端容器化 |
 
-```bash
-export LLM_PROVIDER=openai
-export LLM_API_KEY=sk-xxx
-export LLM_MODEL=gpt-4o
+## 📁 项目结构
+
+```
+.
+├── backend/                 # FastAPI 后端
+│   ├── app/
+│   │   ├── config/          # 配置 (settings, constants)
+│   │   ├── infrastructure/  # LLM Client / Agents / Workflow / Tools
+│   │   └── interfaces/api/  # REST API 路由
+│   └── Dockerfile
+├── frontend/                # Next.js 前端
+│   ├── app/                 # 页面路由
+│   ├── components/          # UI 组件
+│   └── lib/                 # API 客户端
+├── docker-compose.yml       # 一键部署
+└── .env.example             # 环境变量模板
 ```
 
-或在 `backend/.env` 中配置。
+## 📄 License
 
-## 项目状态
+MIT License — 详见 [LICENSE](LICENSE)
 
-- [x] 架构设计
-- [x] 后端项目骨架（DDD 目录结构、FastAPI、LangGraph Workflow）
-- [x] 所有 Agent 实现
-- [x] 前端三页面（首页、分析中、报告页）
-- [x] Docker 容器化
-- [x] 端到端流程验证
+---
 
-## 许可证
-
-MIT
+*Built with ❤️ by AI Agents*

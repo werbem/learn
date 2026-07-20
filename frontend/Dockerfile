@@ -6,10 +6,13 @@ COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 RUN corepack enable && pnpm install --frozen-lockfile
 
 COPY . .
+ENV API_URL=http://backend:8000
 RUN pnpm build
 
 FROM node:22-alpine AS runner
 WORKDIR /app
+
+RUN apk add --no-cache wget
 
 ENV NODE_ENV=production
 

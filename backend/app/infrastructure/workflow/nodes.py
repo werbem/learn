@@ -19,7 +19,9 @@ from app.application.dto.agent_dto import (
     ReviewInput,
     StrategyInput,
 )
+from app.config.settings import settings
 from app.infrastructure.agents.base import AgentContext
+from app.infrastructure.demo_data import build_demo_full_state
 from app.infrastructure.agents.compare_agent import CompareAgent
 from app.infrastructure.agents.insight_agent import InsightAgent
 from app.utils.state_reader import get_validated_input
@@ -70,8 +72,13 @@ def _push_phase(state: WorkflowState, record: dict[str, Any]) -> list[dict[str, 
 # ═══════════════════════════════════════════════════
 
 async def validate_input_node(state: WorkflowState) -> dict[str, Any]:
-    """Gate: validate user input."""
+    """Gate: validate user input. Demo mode 直接返回完整分析结果。"""
     _emit("gate", "running", state)
+
+    # ── Demo mode: short-circuit ──
+    if settings.demo_mode:
+        _emit("gate", "completed", state)
+        return build_demo_full_state(state.get("task_id", "demo-task-001"))
 
     ctx = _make_ctx(state, "gate")
     agent = GateAgent()
@@ -456,10 +463,12 @@ async def finalize_node(state: WorkflowState) -> dict[str, Any]:
         },
     )
 
+    is_demo = state.get("demo", False)
     return {
         "current_phase": "completed",
         "progress": 100.0,
         "updated_at": datetime.utcnow().isoformat(),
+        "demo": is_demo,
         "fact_audit_result": {
             "high_issues": high_issues,
             "deletion_suggestions": deletion_suggestions,

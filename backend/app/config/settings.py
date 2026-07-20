@@ -19,7 +19,9 @@ from enum import Enum
 from pathlib import Path
 
 from dotenv import load_dotenv
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from app.config.constants import DEMO_MODE_DEFAULT
 
 
 # ── Load .env files before Pydantic initializes ──
@@ -89,6 +91,17 @@ class Settings(BaseSettings):
     workflow_max_duration_seconds: int = 300
     workflow_max_retries: int = 3
     workflow_hitl_enabled: bool = False
+
+    # Demo mode — set DEMO_MODE=true for public showcase without API keys
+    demo_mode: bool = DEMO_MODE_DEFAULT  # from DEMO_MODE env var
+
+    @field_validator("demo_mode", mode="before")
+    @classmethod
+    def _coerce_demo_mode(cls, v: object) -> bool:
+        """Handle empty string from docker-compose ${VAR:-} syntax."""
+        if isinstance(v, str) and v.strip() == "":
+            return DEMO_MODE_DEFAULT
+        return v
 
     # Paths
     project_root: Path = Path(__file__).resolve().parent.parent.parent.parent

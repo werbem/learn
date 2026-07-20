@@ -22,7 +22,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             </a>
           </div>
         </header>
-        <main className="container py-6">{children}</main>
+        <main className="">{children}</main>
       </body>
     </html>
   );

@@ -56,6 +56,7 @@ export default function AnalysisProgressPage({
 }) {
   const router = useRouter();
   const [state, setState] = useState<PageState>({ type: "loading", taskId: "" });
+  const [demoMode, setDemoMode] = useState(false);
   const [activeStep, setActiveStep] = useState<StepKey | "">("");
   const [completedSteps, setCompletedSteps] = useState<StepKey[]>([]);
   const [progress, setProgress] = useState(0);
@@ -267,10 +268,10 @@ export default function AnalysisProgressPage({
       },
       (status: string) => {
         // onDone — workflow complete
+        // NOTE: Do NOT navigate immediately. Let polling detect completion
+        // and display intermediate progress steps first.
+        // Save to history and mark complete, polling handles navigation.
         if (status === "completed") {
-          setProgress(100);
-          setEta("");
-          // Only save to history on actual completion
           const p = payloadRef.current;
           saveToHistory({
             taskId: state.serverTaskId,
@@ -279,10 +280,6 @@ export default function AnalysisProgressPage({
             product: p?.product || "",
             objective: p?.objective || "",
           });
-          setTimeout(() => {
-            setState({ type: "completed", taskId: state.serverTaskId });
-            router.push(`/report/${state.serverTaskId}`);
-          }, 500);
         } else if (status === "need_more_research") {
           setState({ type: "error", message: "证据不足，需要补充更多信息后重新分析" });
         }
@@ -308,6 +305,19 @@ export default function AnalysisProgressPage({
         const now = Date.now();
         const startMs = parseInt(sessionStorage.getItem(SS_START_TIME(state.serverTaskId)) || String(now));
         const data = await getProgress(state.serverTaskId);
+
+        // ── Update progress from polling data ──
+        const ph = (data.phase_history || []) as PhaseRecord[];
+        const completed = ph
+          .filter((p) => p.status === "completed")
+          .map((p) => p.phase) as StepKey[];
+        if (completed.length > 0) {
+          setCompletedSteps((prev) => [...new Set([...prev, ...completed])]);
+        }
+        if (typeof data.progress === "number") {
+          setProgress(data.progress);
+        }
+        setPhaseHistory(ph);
 
         // Detect completion states
         const status = data.status;
@@ -542,6 +552,7 @@ export default function AnalysisProgressPage({
           completedSteps={completedSteps}
           phaseHistory={phaseHistory}
           progress={progress}
+          demoMode={demoMode}
         />
       </Card>
       <div className="text-center">
