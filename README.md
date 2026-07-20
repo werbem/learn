@@ -90,7 +90,7 @@
 
 | 首页 Hero | 分析进度 | 分析报告 |
 |-----------|----------|----------|
-| ![hero](docs/screenshots/hero.png) | ![progress](docs/screenshots/progress.png) | ![report](docs/screenshots/report.png) |
+|<img width="1435" height="789" alt="image" src="https://github.com/user-attachments/assets/25a8db3d-b9cf-49eb-95dc-c2cba5a316a7" />| <img width="1439" height="711" alt="image" src="https://github.com/user-attachments/assets/7cc6de7e-dec7-4997-afb1-d7309caeef4d" /> | <img width="1441" height="774" alt="image" src="https://github.com/user-attachments/assets/84cbf792-06e7-4c4e-aa98-a34b498ed175" /> |
 
 ## 🚀 在线 Demo
 
